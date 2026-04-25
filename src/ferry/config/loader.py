@@ -7,12 +7,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ferry.config.schema import Config, RommConfig
+from ferry.domain.destination import PRESETS, Destination, resolve_preset
 
 ENV_API_KEY = "FERRY_ROMM_API_KEY"
 ENV_CONFIG_PATH = "FERRY_CONFIG"
 
-_TOP_LEVEL_KEYS = frozenset({"romm"})
+_TOP_LEVEL_KEYS = frozenset({"romm", "destination"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
+_DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
 
 
 class ApiKeySource(enum.StrEnum):
@@ -103,14 +105,74 @@ def load_config(
     if not isinstance(allow_insecure_ssl, bool):
         raise ConfigInvalidError(f"[romm].allow_insecure_ssl must be a boolean in {path}")
 
+    destination = _parse_destination(raw, path)
+
     config = Config(
         romm=RommConfig(
             url=url,
             api_key=api_key,
             allow_insecure_ssl=allow_insecure_ssl,
-        )
+        ),
+        destination=destination,
     )
     return LoadedConfig(config=config, config_path=path, api_key_source=api_key_source)
+
+
+def _parse_destination(raw: dict, path: Path) -> Destination | None:
+    if "destination" not in raw:
+        return None
+
+    dest = raw["destination"]
+    if not isinstance(dest, dict):
+        raise ConfigInvalidError(f"[destination] must be a table in {path}")
+
+    unknown = set(dest.keys()) - _DESTINATION_KEYS
+    if unknown:
+        raise ConfigInvalidError(f"unknown keys under [destination] in {path}: {sorted(unknown)}")
+
+    preset_name = dest.get("preset")
+    roms_raw = dest.get("roms_base")
+    bios_raw = dest.get("bios_base")
+
+    if preset_name is not None:
+        if not isinstance(preset_name, str):
+            raise ConfigInvalidError(f"[destination].preset must be a string in {path}")
+        if preset_name not in PRESETS:
+            known = ", ".join(sorted(PRESETS))
+            raise ConfigInvalidError(f"unknown preset {preset_name!r} in {path}; known: {known}")
+        default_roms, default_bios = resolve_preset(preset_name, Path.home())
+        roms_base = _require_path(roms_raw, default_roms, "[destination].roms_base", path)
+        bios_base = _optional_path(bios_raw, default_bios, "[destination].bios_base", path)
+        return Destination(roms_base=roms_base, bios_base=bios_base, preset=preset_name)
+
+    if roms_raw is None:
+        raise ConfigInvalidError(
+            f"[destination] in {path} requires either `preset` or `roms_base` "
+            f"(`bios_base` is optional)."
+        )
+    return Destination(
+        roms_base=_require_path(roms_raw, None, "[destination].roms_base", path),
+        bios_base=_optional_path(bios_raw, None, "[destination].bios_base", path),
+        preset=None,
+    )
+
+
+def _require_path(raw: object, default: Path | None, label: str, path: Path) -> Path:
+    if raw is None:
+        if default is None:
+            raise ConfigInvalidError(f"{label} is required in {path}")
+        return default
+    if not isinstance(raw, str) or not raw:
+        raise ConfigInvalidError(f"{label} must be a non-empty string in {path}")
+    return Path(raw).expanduser()
+
+
+def _optional_path(raw: object, default: Path | None, label: str, path: Path) -> Path | None:
+    if raw is None:
+        return default
+    if not isinstance(raw, str) or not raw:
+        raise ConfigInvalidError(f"{label} must be a non-empty string in {path}")
+    return Path(raw).expanduser()
 
 
 def _require_str(table: dict, key: str, path: Path) -> str:

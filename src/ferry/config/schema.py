@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 
+from ferry.domain.destination import Destination
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RommConfig:
@@ -11,3 +13,4 @@ class RommConfig:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Config:
     romm: RommConfig
+    destination: Destination | None = None

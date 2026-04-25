@@ -8,6 +8,7 @@ from ferry.config.loader import (
     load_config,
 )
 from ferry.config.schema import Config, RommConfig
+from ferry.domain.destination import Destination
 
 __all__ = [
     "ApiKeySource",
@@ -15,6 +16,7 @@ __all__ = [
     "ConfigError",
     "ConfigInvalidError",
     "ConfigNotFoundError",
+    "Destination",
     "LoadedConfig",
     "RommConfig",
     "default_config_path",

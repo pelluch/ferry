@@ -147,3 +147,166 @@ def test_repr_does_not_leak_api_key(tmp_path: Path) -> None:
     cfg_file = write(tmp_path / "config.toml", minimal_toml("rmm_secret_value"))
     loaded = load_config(cfg_file, env={})
     assert "rmm_secret_value" not in repr(loaded.config.romm)
+
+
+# ---------------------------------------------------------------------------
+# [destination] section
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Pin Path.home() to a fresh tmp dir so preset path resolution is deterministic."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+def test_no_destination_section_yields_none(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml())
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.destination is None
+
+
+def test_destination_preset_resolves_under_home(tmp_path: Path, fake_home: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[destination]\npreset = "retrodeck-flatpak"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    dest = loaded.config.destination
+    assert dest is not None
+    assert dest.preset == "retrodeck-flatpak"
+    assert dest.roms_base == fake_home / "retrodeck/roms"
+    assert dest.bios_base == fake_home / "retrodeck/bios"
+
+
+def test_destination_preset_with_bios_override(tmp_path: Path, fake_home: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml()
+        + '\n[destination]\npreset = "retrodeck-flatpak"\nbios_base = "/mnt/sd/bios"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    dest = loaded.config.destination
+    assert dest is not None
+    assert dest.preset == "retrodeck-flatpak"
+    assert dest.roms_base == fake_home / "retrodeck/roms"  # preset default
+    assert dest.bios_base == Path("/mnt/sd/bios")  # explicit override
+
+
+def test_destination_explicit_paths_no_preset(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[destination]\nroms_base = "/data/roms"\nbios_base = "/data/bios"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    dest = loaded.config.destination
+    assert dest is not None
+    assert dest.preset is None
+    assert dest.roms_base == Path("/data/roms")
+    assert dest.bios_base == Path("/data/bios")
+
+
+def test_destination_path_expanduser_is_applied(tmp_path: Path, fake_home: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml()
+        + '\n[destination]\nroms_base = "~/games/roms"\nbios_base = "~/games/bios"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    dest = loaded.config.destination
+    assert dest is not None
+    assert dest.roms_base == fake_home / "games/roms"
+    assert dest.bios_base == fake_home / "games/bios"
+
+
+def test_destination_unknown_preset_raises(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[destination]\npreset = "nintendo-switch-classic"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="unknown preset"):
+        load_config(cfg_file, env={})
+
+
+def test_destination_no_preset_and_no_roms_raises(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[destination]\n")
+    with pytest.raises(ConfigInvalidError, match="preset.*roms_base"):
+        load_config(cfg_file, env={})
+
+
+def test_destination_explicit_roms_only_is_valid(tmp_path: Path) -> None:
+    """bios_base is optional — bare ES-DE has no centralized BIOS root."""
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[destination]\nroms_base = "/data/roms"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    dest = loaded.config.destination
+    assert dest is not None
+    assert dest.roms_base == Path("/data/roms")
+    assert dest.bios_base is None
+
+
+def test_destination_bios_without_roms_raises(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[destination]\nbios_base = "/data/bios"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="preset.*roms_base"):
+        load_config(cfg_file, env={})
+
+
+def test_destination_esde_native_preset_has_none_bios(tmp_path: Path, fake_home: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[destination]\npreset = "esde-native"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    dest = loaded.config.destination
+    assert dest is not None
+    assert dest.preset == "esde-native"
+    assert dest.roms_base == fake_home / "ROMs"
+    assert dest.bios_base is None
+
+
+def test_destination_esde_native_can_override_bios(tmp_path: Path, fake_home: Path) -> None:
+    """User can opt into a centralized BIOS even when the preset doesn't have one."""
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[destination]\npreset = "esde-native"\nbios_base = "/srv/bios"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    dest = loaded.config.destination
+    assert dest is not None
+    assert dest.bios_base == Path("/srv/bios")
+
+
+def test_destination_unknown_key_raises(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[destination]\npreset = "esde-native"\nsave_base = "/etc"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="unknown keys under \\[destination\\]"):
+        load_config(cfg_file, env={})
+
+
+def test_destination_path_must_be_string(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + "\n[destination]\nroms_base = 1\nbios_base = 2\n",
+    )
+    with pytest.raises(ConfigInvalidError, match="roms_base"):
+        load_config(cfg_file, env={})
+
+
+def test_destination_section_must_be_a_table(tmp_path: Path) -> None:
+    # `destination` at top level (before any [section] header) parses as a
+    # bare top-level value, not a table — exactly the "[destination] preset = X
+    # mistakenly written as one line" error mode we want to catch.
+    cfg_file = write(
+        tmp_path / "config.toml",
+        f'destination = "retrodeck"\n{minimal_toml()}',
+    )
+    with pytest.raises(ConfigInvalidError, match="\\[destination\\] must be a table"):
+        load_config(cfg_file, env={})

@@ -106,6 +106,82 @@ def test_ping_auth_error_surfaces_friendly_hint(tmp_path: Path) -> None:
     assert "API key" in result.output  # the friendly hint we add for auth errors
 
 
+# ---------------------------------------------------------------------------
+# [destination] surfaced in ping output
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_ping_without_destination_says_not_configured(tmp_path: Path) -> None:
+    mock_romm_endpoints()
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "ping"], env={})
+    assert result.exit_code == 0, result.output
+    assert "destination:" in result.output
+    assert "not configured" in result.output
+
+
+@respx.mock
+def test_ping_with_preset_destination_shows_paths_and_status(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "retrodeck/roms").mkdir(parents=True)  # roms exists
+    # bios deliberately missing
+    mock_romm_endpoints()
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[romm]\nurl = "https://romm.example.tld"\n'
+        'api_key = "rmm_abcdef0123456789"\n'
+        '[destination]\npreset = "retrodeck-flatpak"\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "ping"], env={})
+    assert result.exit_code == 0, result.output
+    assert "destination.preset:      retrodeck-flatpak" in result.output
+    assert "retrodeck/roms (exists)" in result.output
+    assert "retrodeck/bios (missing)" in result.output
+
+
+@respx.mock
+def test_ping_with_custom_destination_labels_as_custom(tmp_path: Path) -> None:
+    mock_romm_endpoints()
+    cfg = tmp_path / "config.toml"
+    roms = tmp_path / "roms"
+    bios = tmp_path / "bios"
+    roms.mkdir()
+    bios.mkdir()
+    cfg.write_text(
+        '[romm]\nurl = "https://romm.example.tld"\n'
+        'api_key = "rmm_abcdef0123456789"\n'
+        f'[destination]\nroms_base = "{roms}"\nbios_base = "{bios}"\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "ping"], env={})
+    assert result.exit_code == 0, result.output
+    assert "destination.preset:      (custom)" in result.output
+    assert f"{roms} (exists)" in result.output
+    assert f"{bios} (exists)" in result.output
+
+
+@respx.mock
+def test_ping_with_esde_native_preset_shows_per_emulator_bios(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "ROMs").mkdir()
+    mock_romm_endpoints()
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[romm]\nurl = "https://romm.example.tld"\n'
+        'api_key = "rmm_abcdef0123456789"\n'
+        '[destination]\npreset = "esde-native"\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "ping"], env={})
+    assert result.exit_code == 0, result.output
+    assert "destination.preset:      esde-native" in result.output
+    assert f"{tmp_path}/ROMs (exists)" in result.output
+    assert "per-emulator" in result.output
+
+
 def test_ping_missing_config_exits_nonzero(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(tmp_path / "nope.toml"), "ping"], env={})
