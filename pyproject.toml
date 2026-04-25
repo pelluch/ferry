@@ -20,6 +20,7 @@ classifiers = [
 
 dependencies = [
     "click>=8.1",
+    "httpx>=0.28.1",
 ]
 
 [project.scripts]
@@ -32,6 +33,7 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "respx>=0.23.1",
     "ruff>=0.7",
 ]
 
