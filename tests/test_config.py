@@ -346,6 +346,86 @@ def test_sync_section_must_be_a_table(tmp_path: Path) -> None:
         load_config(cfg_file, env={})
 
 
+# ---------------------------------------------------------------------------
+# [transforms] section
+# ---------------------------------------------------------------------------
+
+
+def test_no_transforms_section_yields_empty_config(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml())
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.transforms.pipelines == {}
+    # Unconfigured platforms get no pipeline.
+    assert loaded.config.transforms.for_platform("gc") == ()
+
+
+def test_transforms_pipeline_parses(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[transforms.gc]\npipeline = ["unzip"]\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.transforms.for_platform("gc") == ("unzip",)
+
+
+def test_transforms_multiple_platforms(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml()
+        + '\n[transforms.gc]\npipeline = ["unzip"]\n'
+        + '\n[transforms.wii]\npipeline = ["unzip"]\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.transforms.for_platform("gc") == ("unzip",)
+    assert loaded.config.transforms.for_platform("wii") == ("unzip",)
+    assert loaded.config.transforms.for_platform("nes") == ()
+
+
+def test_transforms_unknown_name_raises(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[transforms.gc]\npipeline = ["unzipp"]\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="unknown transform 'unzipp'"):
+        load_config(cfg_file, env={})
+
+
+def test_transforms_pipeline_must_be_list(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[transforms.gc]\npipeline = "unzip"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="must be a list"):
+        load_config(cfg_file, env={})
+
+
+def test_transforms_unknown_subkey_raises(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[transforms.gc]\npipeline = ["unzip"]\nbogus = true\n',
+    )
+    with pytest.raises(ConfigInvalidError, match=r"unknown keys under \[transforms\.gc\]"):
+        load_config(cfg_file, env={})
+
+
+def test_transforms_empty_pipeline_is_valid(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + "\n[transforms.gc]\npipeline = []\n",
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.transforms.for_platform("gc") == ()
+
+
+def test_transforms_section_must_be_a_table(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        f'transforms = "unzip"\n{minimal_toml()}',
+    )
+    with pytest.raises(ConfigInvalidError, match=r"\[transforms\] must be a table"):
+        load_config(cfg_file, env={})
+
+
 def test_destination_unknown_key_raises(tmp_path: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",

@@ -6,16 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ferry.config.schema import Config, RommConfig, SyncConfig
+from ferry.config.schema import Config, RommConfig, SyncConfig, TransformsConfig
 from ferry.domain.destination import PRESETS, Destination, resolve_preset
+from ferry.transforms import known_transforms
 
 ENV_API_KEY = "FERRY_ROMM_API_KEY"
 ENV_CONFIG_PATH = "FERRY_CONFIG"
 
-_TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync"})
+_TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync", "transforms"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
 _DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
 _SYNC_KEYS = frozenset({"collection", "primary_version_only"})
+_TRANSFORMS_PLATFORM_KEYS = frozenset({"pipeline"})
 
 
 class ApiKeySource(enum.StrEnum):
@@ -108,6 +110,7 @@ def load_config(
 
     destination = _parse_destination(raw, path)
     sync = _parse_sync(raw, path)
+    transforms = _parse_transforms(raw, path)
 
     config = Config(
         romm=RommConfig(
@@ -117,6 +120,7 @@ def load_config(
         ),
         destination=destination,
         sync=sync,
+        transforms=transforms,
     )
     return LoadedConfig(config=config, config_path=path, api_key_source=api_key_source)
 
@@ -141,6 +145,41 @@ def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:
         raise ConfigInvalidError(f"[sync].primary_version_only must be a boolean in {path}")
 
     return SyncConfig(collection=collection, primary_version_only=primary)
+
+
+def _parse_transforms(raw: dict, path: Path) -> TransformsConfig:
+    if "transforms" not in raw:
+        return TransformsConfig(pipelines={})
+
+    section = raw["transforms"]
+    if not isinstance(section, dict):
+        raise ConfigInvalidError(f"[transforms] must be a table in {path}")
+
+    valid_names = known_transforms()
+    pipelines: dict[str, tuple[str, ...]] = {}
+    for platform_slug, sub in section.items():
+        if not isinstance(sub, dict):
+            raise ConfigInvalidError(f"[transforms.{platform_slug}] must be a table in {path}")
+        unknown = set(sub.keys()) - _TRANSFORMS_PLATFORM_KEYS
+        if unknown:
+            raise ConfigInvalidError(
+                f"unknown keys under [transforms.{platform_slug}] in {path}: {sorted(unknown)}"
+            )
+        pipeline = sub.get("pipeline", [])
+        if not isinstance(pipeline, list) or not all(isinstance(t, str) for t in pipeline):
+            raise ConfigInvalidError(
+                f"[transforms.{platform_slug}].pipeline must be a list of strings in {path}"
+            )
+        for t in pipeline:
+            if t not in valid_names:
+                known_str = ", ".join(sorted(valid_names))
+                raise ConfigInvalidError(
+                    f"unknown transform {t!r} in [transforms.{platform_slug}]"
+                    f" in {path}; known: {known_str}"
+                )
+        pipelines[platform_slug] = tuple(pipeline)
+
+    return TransformsConfig(pipelines=pipelines)
 
 
 def _parse_destination(raw: dict, path: Path) -> Destination | None:
