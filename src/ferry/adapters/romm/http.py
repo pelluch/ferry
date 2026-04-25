@@ -8,8 +8,11 @@
 #   - Decky-specific load_platform_map / resolve_system dropped (replaced by
 #     ferry's frontend-profile abstraction in a later checkpoint).
 
+import hashlib
 import logging
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
@@ -29,6 +32,23 @@ from ferry.config import RommConfig
 
 DEFAULT_CONNECT_TIMEOUT = 30.0
 DEFAULT_READ_TIMEOUT = 60.0
+# Tuned for streaming large ROMs without holding much in memory.
+DEFAULT_DOWNLOAD_TIMEOUT = httpx.Timeout(
+    connect=DEFAULT_CONNECT_TIMEOUT,
+    read=DEFAULT_READ_TIMEOUT,
+    write=DEFAULT_READ_TIMEOUT,
+    pool=DEFAULT_CONNECT_TIMEOUT,
+)
+_DOWNLOAD_BLOCK_SIZE = 64 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadResult:
+    """Outcome of a successful download — what's now on disk."""
+
+    path: Path
+    md5: str
+    size: int
 
 
 class RommHttpAdapter:
@@ -99,6 +119,20 @@ class RommHttpAdapter:
         """
         return self._with_retry(self._do_get_json, path, params)
 
+    def download(self, path: str, dest_path: Path) -> DownloadResult:
+        """Stream a file to *dest_path*, computing md5 as we go.
+
+        Writes to a sibling `.part` tempfile and atomically renames on
+        success. The md5 is computed over the bytes we received — that's our
+        source hash regardless of whether RomM advertised one (DESIGN.md
+        notes hashing is opt-in server-side).
+
+        `path` is passed to httpx unchanged; pre-encoded percent sequences
+        are NOT re-encoded, so callers should encode filenames once with
+        `urllib.parse.quote(safe="")` before assembling the path.
+        """
+        return self._with_retry(self._do_download, path, dest_path)
+
     # ------------------------------------------------------------------
     # Implementation
     # ------------------------------------------------------------------
@@ -113,6 +147,62 @@ class RommHttpAdapter:
         if response.is_success:
             return response.json()
         raise self._translate_status(response, url, "GET")
+
+    def _do_download(self, path: str, dest_path: Path) -> DownloadResult:
+        url = self._absolute_url(path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = dest_path.with_name(dest_path.name + ".part")
+
+        md5 = hashlib.md5()
+        size = 0
+        try:
+            with self._client.stream("GET", path) as response:
+                if not response.is_success:
+                    # Drain so the body is available if needed (small at error path).
+                    response.read()
+                    raise self._translate_status(response, url, "GET")
+
+                advertised_total = self._content_length(response)
+                with tmp_path.open("wb") as f:
+                    for chunk in response.iter_bytes(chunk_size=_DOWNLOAD_BLOCK_SIZE):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        md5.update(chunk)
+                        size += len(chunk)
+
+                if advertised_total is not None and size != advertised_total:
+                    raise RommApiError(
+                        f"download truncated: got {size} bytes, expected {advertised_total} "
+                        f"(GET {url})",
+                        url=url,
+                        method="GET",
+                    )
+                if size == 0 and advertised_total in (None, 0):
+                    raise RommApiError(
+                        f"download produced 0 bytes (GET {url})",
+                        url=url,
+                        method="GET",
+                    )
+        except httpx.HTTPError as exc:
+            tmp_path.unlink(missing_ok=True)
+            raise self._translate_transport_error(exc, url, "GET") from exc
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+        tmp_path.replace(dest_path)
+        return DownloadResult(path=dest_path, md5=md5.hexdigest(), size=size)
+
+    @staticmethod
+    def _content_length(response: httpx.Response) -> int | None:
+        raw = response.headers.get("Content-Length")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
 
     def _absolute_url(self, path: str) -> str:
         return f"{self._config.url}{path}"

@@ -1,6 +1,8 @@
+import urllib.parse
+from pathlib import Path
 from typing import Any
 
-from ferry.adapters.romm.http import RommHttpAdapter
+from ferry.adapters.romm.http import DownloadResult, RommHttpAdapter
 
 # RomM caps `limit` at 10000; we use the cap so a typical library fits in a
 # single request and pagination only kicks in for very large collections.
@@ -61,3 +63,25 @@ class RommApi:
                 break
             offset += ROMS_PAGE_SIZE
         return items
+
+    def download_rom(
+        self,
+        rom_id: int,
+        url_filename: str,
+        dest_path: Path,
+    ) -> DownloadResult:
+        """Stream a ROM's content to *dest_path*.
+
+        `url_filename` is the value RomM uses for the response's
+        Content-Disposition (and to disambiguate path components in logs);
+        the actual ROM is identified by `rom_id`. Pass `rom['fs_name']` from
+        a /api/roms response.
+
+        The filename is URL-encoded with `safe=""` so all reserved characters
+        — `&`, `(`, `)`, spaces, unicode — are escaped exactly once before
+        the path goes to httpx (which is idempotent on `%XX` sequences,
+        sidestepping the double-URL-encode bug from decky-romm-sync).
+        """
+        encoded = urllib.parse.quote(url_filename, safe="")
+        path = f"/api/roms/{rom_id}/content/{encoded}"
+        return self._http.download(path, dest_path)

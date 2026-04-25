@@ -1,3 +1,5 @@
+import hashlib
+
 import httpx
 import pytest
 import respx
@@ -261,3 +263,154 @@ def test_list_roms_handles_empty_collection() -> None:
         api = RommApi(http)
         roms = api.list_roms_in_collection(7)
     assert roms == []
+
+
+# ---------------------------------------------------------------------------
+# RommHttpAdapter.download — streaming, hashing, atomicity
+# ---------------------------------------------------------------------------
+
+
+_PAYLOAD = b"this is the rom payload" * 100  # ~2KB
+_PAYLOAD_MD5 = hashlib.md5(_PAYLOAD).hexdigest()  # computed once at module load
+
+
+@respx.mock
+def test_download_streams_to_dest_and_returns_hash(tmp_path) -> None:
+    respx.get(f"{BASE_URL}/api/roms/42/content/Game.zip").mock(
+        return_value=httpx.Response(200, content=_PAYLOAD)
+    )
+    dest = tmp_path / "out" / "Game.zip"
+    with RommHttpAdapter(make_config()) as http:
+        result = http.download("/api/roms/42/content/Game.zip", dest)
+
+    assert result.path == dest
+    assert result.md5 == _PAYLOAD_MD5
+    assert result.size == len(_PAYLOAD)
+    assert dest.read_bytes() == _PAYLOAD
+    # No `.part` left behind on success.
+    assert not (dest.parent / (dest.name + ".part")).exists()
+
+
+@respx.mock
+def test_download_creates_parent_dirs(tmp_path) -> None:
+    respx.get(f"{BASE_URL}/api/x").mock(return_value=httpx.Response(200, content=_PAYLOAD))
+    dest = tmp_path / "deep" / "nested" / "Game.zip"
+    with RommHttpAdapter(make_config()) as http:
+        http.download("/api/x", dest)
+    assert dest.exists()
+
+
+@respx.mock
+def test_download_atomic_rename_no_partial_dest_on_404(tmp_path) -> None:
+    respx.get(f"{BASE_URL}/api/x").mock(return_value=httpx.Response(404))
+    dest = tmp_path / "Game.zip"
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommNotFoundError):
+        http.download("/api/x", dest)
+    # No file at dest, no `.part` either.
+    assert not dest.exists()
+    assert not (dest.parent / (dest.name + ".part")).exists()
+
+
+@respx.mock
+def test_download_truncated_response_raises(tmp_path) -> None:
+    """Server says Content-Length=N but delivers less → integrity error."""
+    # Build a response with Content-Length lying about size.
+    respx.get(f"{BASE_URL}/api/x").mock(
+        return_value=httpx.Response(
+            200,
+            content=_PAYLOAD,  # actual bytes
+            headers={"Content-Length": str(len(_PAYLOAD) * 2)},  # claims more
+        )
+    )
+    dest = tmp_path / "Game.zip"
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommApiError, match="truncated"):
+        http.download("/api/x", dest)
+    assert not dest.exists()
+
+
+@respx.mock
+def test_download_zero_bytes_no_content_length_raises(tmp_path) -> None:
+    """No Content-Length AND no data delivered → suspicious; refuse."""
+    respx.get(f"{BASE_URL}/api/x").mock(return_value=httpx.Response(200, content=b""))
+    dest = tmp_path / "Game.zip"
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommApiError, match="0 bytes"):
+        http.download("/api/x", dest)
+    assert not dest.exists()
+
+
+@respx.mock
+def test_download_retries_on_5xx_then_succeeds(tmp_path) -> None:
+    respx.get(f"{BASE_URL}/api/x").mock(
+        side_effect=[
+            httpx.Response(500),
+            httpx.Response(200, content=_PAYLOAD),
+        ]
+    )
+    dest = tmp_path / "Game.zip"
+    with RommHttpAdapter(make_config()) as http:
+        result = http.download("/api/x", dest)
+    assert result.md5 == _PAYLOAD_MD5
+    assert dest.read_bytes() == _PAYLOAD
+
+
+@respx.mock
+def test_download_does_not_retry_auth_errors(tmp_path) -> None:
+    route = respx.get(f"{BASE_URL}/api/x").mock(return_value=httpx.Response(401))
+    dest = tmp_path / "Game.zip"
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommAuthError):
+        http.download("/api/x", dest)
+    assert route.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# RommApi.download_rom — URL encoding (the lifted bug)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_download_rom_encodes_filename_once(tmp_path) -> None:
+    """Spaces/&/() in filenames are encoded once; `%XX` is not double-escaped."""
+    # Filename has spaces, ampersand, parentheses — full v1 exit-criteria set.
+    filename = "Sonic & Knuckles (USA).zip"
+    expected_path = "/api/roms/123/content/Sonic%20%26%20Knuckles%20%28USA%29.zip"
+    route = respx.get(f"{BASE_URL}{expected_path}").mock(
+        return_value=httpx.Response(200, content=_PAYLOAD)
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        result = api.download_rom(123, filename, tmp_path / "out.zip")
+    assert route.called
+    assert result.size == len(_PAYLOAD)
+    # Confirm only ONE round of encoding happened — no `%2520` substring.
+    sent_url = str(route.calls.last.request.url)
+    assert "%2520" not in sent_url
+
+
+@respx.mock
+def test_download_rom_handles_unicode_filename(tmp_path) -> None:
+    """Non-ASCII filenames are URL-encoded as UTF-8 byte sequences."""
+    filename = "ポケモン.zip"
+    # UTF-8 bytes of "ポケモン" → percent-encoded.
+    expected_path = "/api/roms/1/content/%E3%83%9D%E3%82%B1%E3%83%A2%E3%83%B3.zip"
+    route = respx.get(f"{BASE_URL}{expected_path}").mock(
+        return_value=httpx.Response(200, content=_PAYLOAD)
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.download_rom(1, filename, tmp_path / "out.zip")
+    assert route.called
+    assert (tmp_path / "out.zip").read_bytes() == _PAYLOAD
+
+
+@respx.mock
+def test_download_rom_handles_apostrophe(tmp_path) -> None:
+    """Apostrophes in filenames (e.g., Castlevania II: Belmont's Revenge)."""
+    filename = "Belmont's Revenge.zip"
+    expected_path = "/api/roms/77/content/Belmont%27s%20Revenge.zip"
+    route = respx.get(f"{BASE_URL}{expected_path}").mock(
+        return_value=httpx.Response(200, content=_PAYLOAD)
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.download_rom(77, filename, tmp_path / "out.zip")
+    assert route.called

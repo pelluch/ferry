@@ -11,9 +11,10 @@ from ferry.adapters.romm.errors import (
     RommTimeoutError,
     RommUnsupportedError,
 )
-from ferry.adapters.romm.http import RommHttpAdapter
+from ferry.adapters.romm.http import DownloadResult, RommHttpAdapter
 
 __all__ = [
+    "DownloadResult",
     "RommApi",
     "RommApiError",
     "RommAuthError",
