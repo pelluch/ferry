@@ -6,15 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ferry.config.schema import Config, RommConfig
+from ferry.config.schema import Config, RommConfig, SyncConfig
 from ferry.domain.destination import PRESETS, Destination, resolve_preset
 
 ENV_API_KEY = "FERRY_ROMM_API_KEY"
 ENV_CONFIG_PATH = "FERRY_CONFIG"
 
-_TOP_LEVEL_KEYS = frozenset({"romm", "destination"})
+_TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
 _DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
+_SYNC_KEYS = frozenset({"collection", "primary_version_only"})
 
 
 class ApiKeySource(enum.StrEnum):
@@ -106,6 +107,7 @@ def load_config(
         raise ConfigInvalidError(f"[romm].allow_insecure_ssl must be a boolean in {path}")
 
     destination = _parse_destination(raw, path)
+    sync = _parse_sync(raw, path)
 
     config = Config(
         romm=RommConfig(
@@ -114,8 +116,31 @@ def load_config(
             allow_insecure_ssl=allow_insecure_ssl,
         ),
         destination=destination,
+        sync=sync,
     )
     return LoadedConfig(config=config, config_path=path, api_key_source=api_key_source)
+
+
+def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:
+    if "sync" not in raw:
+        return None
+    sync = raw["sync"]
+    if not isinstance(sync, dict):
+        raise ConfigInvalidError(f"[sync] must be a table in {path}")
+
+    unknown = set(sync.keys()) - _SYNC_KEYS
+    if unknown:
+        raise ConfigInvalidError(f"unknown keys under [sync] in {path}: {sorted(unknown)}")
+
+    collection = sync.get("collection")
+    if not isinstance(collection, str) or not collection:
+        raise ConfigInvalidError(f"[sync].collection must be a non-empty string in {path}")
+
+    primary = sync.get("primary_version_only", False)
+    if not isinstance(primary, bool):
+        raise ConfigInvalidError(f"[sync].primary_version_only must be a boolean in {path}")
+
+    return SyncConfig(collection=collection, primary_version_only=primary)
 
 
 def _parse_destination(raw: dict, path: Path) -> Destination | None:

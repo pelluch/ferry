@@ -170,3 +170,94 @@ def test_list_collections_hits_collections() -> None:
         cols = api.list_collections()
     assert cols == [{"id": 1, "name": "Steam Deck"}]
     assert route.called
+
+
+# ---------------------------------------------------------------------------
+# RommApi.list_roms_in_collection — pagination + params
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_list_roms_returns_items_from_single_page() -> None:
+    route = respx.get(f"{BASE_URL}/api/roms").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [{"id": 1}, {"id": 2}, {"id": 3}],
+                "total": 3,
+                "limit": 10000,
+                "offset": 0,
+            },
+        )
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        roms = api.list_roms_in_collection(7)
+    assert [r["id"] for r in roms] == [1, 2, 3]
+    assert route.call_count == 1
+    sent = route.calls.last.request
+    # Query params we care about end up on the URL.
+    assert "collection_id=7" in str(sent.url)
+    assert "with_char_index=false" in str(sent.url)
+    assert "with_filter_values=false" in str(sent.url)
+
+
+@respx.mock
+def test_list_roms_paginates_when_total_exceeds_page() -> None:
+    """If total > page_size, the adapter walks offsets until items collected."""
+    page_size = 2
+    # Patch the adapter's page size to 2 for this test only — keeps the test
+    # fast and exercises the pagination loop without huge fixtures.
+    import ferry.adapters.romm.api as api_module
+
+    original = api_module.ROMS_PAGE_SIZE
+    api_module.ROMS_PAGE_SIZE = page_size
+    try:
+        responses = [
+            httpx.Response(
+                200,
+                json={"items": [{"id": 1}, {"id": 2}], "total": 5, "limit": 2, "offset": 0},
+            ),
+            httpx.Response(
+                200,
+                json={"items": [{"id": 3}, {"id": 4}], "total": 5, "limit": 2, "offset": 2},
+            ),
+            httpx.Response(
+                200,
+                json={"items": [{"id": 5}], "total": 5, "limit": 2, "offset": 4},
+            ),
+        ]
+        respx.get(f"{BASE_URL}/api/roms").mock(side_effect=responses)
+        with RommHttpAdapter(make_config()) as http:
+            api = RommApi(http)
+            roms = api.list_roms_in_collection(7)
+    finally:
+        api_module.ROMS_PAGE_SIZE = original
+    assert [r["id"] for r in roms] == [1, 2, 3, 4, 5]
+
+
+@respx.mock
+def test_list_roms_passes_group_by_meta_id_when_primary_only() -> None:
+    route = respx.get(f"{BASE_URL}/api/roms").mock(
+        return_value=httpx.Response(
+            200, json={"items": [], "total": 0, "limit": 10000, "offset": 0}
+        )
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.list_roms_in_collection(7, primary_only=True)
+    sent = route.calls.last.request
+    assert "group_by_meta_id=true" in str(sent.url)
+
+
+@respx.mock
+def test_list_roms_handles_empty_collection() -> None:
+    respx.get(f"{BASE_URL}/api/roms").mock(
+        return_value=httpx.Response(
+            200, json={"items": [], "total": 0, "limit": 10000, "offset": 0}
+        )
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        roms = api.list_roms_in_collection(7)
+    assert roms == []

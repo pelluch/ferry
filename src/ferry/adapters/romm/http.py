@@ -91,18 +91,22 @@ class RommHttpAdapter:
     # Public surface
     # ------------------------------------------------------------------
 
-    def get_json(self, path: str) -> Any:
-        """GET a JSON resource from the RomM API. Returns parsed body."""
-        return self._with_retry(self._do_get_json, path)
+    def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """GET a JSON resource from the RomM API. Returns parsed body.
+
+        `params` are URL-encoded by httpx; pass scalar or list values, not
+        already-encoded query strings.
+        """
+        return self._with_retry(self._do_get_json, path, params)
 
     # ------------------------------------------------------------------
     # Implementation
     # ------------------------------------------------------------------
 
-    def _do_get_json(self, path: str) -> Any:
+    def _do_get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = self._absolute_url(path)
         try:
-            response = self._client.get(path)
+            response = self._client.get(path, params=params)
         except httpx.HTTPError as exc:
             raise self._translate_transport_error(exc, url, "GET") from exc
 

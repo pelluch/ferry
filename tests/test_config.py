@@ -282,6 +282,70 @@ def test_destination_esde_native_can_override_bios(tmp_path: Path, fake_home: Pa
     assert dest.bios_base == Path("/srv/bios")
 
 
+# ---------------------------------------------------------------------------
+# [sync] section
+# ---------------------------------------------------------------------------
+
+
+def test_no_sync_section_yields_none(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml())
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.sync is None
+
+
+def test_sync_collection_required(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml", minimal_toml() + "\n[sync]\nprimary_version_only = true\n"
+    )
+    with pytest.raises(ConfigInvalidError, match=r"\[sync\]\.collection"):
+        load_config(cfg_file, env={})
+
+
+def test_sync_collection_must_be_string(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[sync]\ncollection = 12\n")
+    with pytest.raises(ConfigInvalidError, match="collection"):
+        load_config(cfg_file, env={})
+
+
+def test_sync_loads_with_collection(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.sync is not None
+    assert loaded.config.sync.collection == "Steam Deck"
+    assert loaded.config.sync.primary_version_only is False
+
+
+def test_sync_primary_version_only_parses(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\nprimary_version_only = true\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.sync is not None
+    assert loaded.config.sync.primary_version_only is True
+
+
+def test_sync_unknown_key_raises(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[sync]\ncollection = "X"\nbreed = "labradoodle"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match=r"unknown keys under \[sync\]"):
+        load_config(cfg_file, env={})
+
+
+def test_sync_section_must_be_a_table(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        f'sync = "Steam Deck"\n{minimal_toml()}',
+    )
+    with pytest.raises(ConfigInvalidError, match=r"\[sync\] must be a table"):
+        load_config(cfg_file, env={})
+
+
 def test_destination_unknown_key_raises(tmp_path: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",
