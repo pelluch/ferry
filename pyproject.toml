@@ -5,7 +5,7 @@ description = "Sync a self-hosted RomM library to a local Linux ES-DE install."
 readme = "README.md"
 license = "GPL-3.0-only"
 requires-python = ">=3.12"
-authors = [{ name = "Pablo", email = "claude.fester@postnode.org" }]
+authors = [{ name = "Pablo Lluch", email = "dev@pablolluch.me" }]
 keywords = ["romm", "es-de", "retrodeck", "emudeck", "retro-gaming", "sync"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
