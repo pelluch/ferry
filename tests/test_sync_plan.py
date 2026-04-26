@@ -67,19 +67,15 @@ def test_update_when_updated_at_differs(make_rom) -> None:
     assert "2026-04-26" in plan.to_update[0].reason  # new timestamp surfaced
 
 
-def test_delete_when_rom_no_longer_in_collection(make_rom) -> None:
+def test_planner_always_populates_to_delete(make_rom) -> None:
+    """`to_delete` is informational; the executor decides whether to act on it
+    based on `[sync].delete_on_remove`. The planner has no opinion."""
     state = LibraryState(roms={42: make_rom(rom_id=42, name="Old Game")})
     plan = compute_plan(current_roms=[], state=state)
     assert len(plan.to_delete) == 1
     assert plan.to_delete[0].rom_id == 42
     assert plan.to_delete[0].name == "Old Game"
     assert "no longer in collection" in plan.to_delete[0].reason
-
-
-def test_delete_on_remove_false_suppresses_deletions(make_rom) -> None:
-    state = LibraryState(roms={42: make_rom(rom_id=42)})
-    plan = compute_plan(current_roms=[], state=state, delete_on_remove=False)
-    assert plan.to_delete == []
 
 
 def test_mixed_plan(make_rom) -> None:

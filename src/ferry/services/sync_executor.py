@@ -33,8 +33,9 @@ from ferry.config.schema import Config
 from ferry.domain.destination import Destination
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.state import LibraryState, RomState, TransformedOutput
-from ferry.domain.sync_plan import AddAction, SyncPlan, UpdateAction
+from ferry.domain.sync_plan import AddAction, DeleteAction, SyncPlan, UpdateAction
 from ferry.services.pipeline import run_pipeline
+from ferry.services.trash import trash_paths
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,19 @@ class RomFailure:
     error: str
 
 
+@dataclass(frozen=True, slots=True)
+class RomDeletion:
+    rom_id: int
+    name: str
+    platform_slug: str
+    trash_dir: Path
+
+
 @dataclass(slots=True)
 class ExecutionResult:
     succeeded: list[RomSuccess] = field(default_factory=list)
     failed: list[RomFailure] = field(default_factory=list)
-    skipped_deletes: int = 0
+    deleted: list[RomDeletion] = field(default_factory=list)
 
 
 # Progress reporter contract: called once per ROM with the action index/total
@@ -82,22 +91,67 @@ def execute_plan(
     state: LibraryState,
     state_path: Path,
     scratch_root: Path,
+    trash_root: Path,
+    delete_on_remove: bool = False,
     progress: ProgressFn = lambda _msg: None,
 ) -> ExecutionResult:
     """Execute *plan* against the live RomM and the local filesystem.
 
-    Mutates `state` (the in-memory copy) and writes `state_path` after each
-    successful ROM. Returns aggregated success/failure counts.
+    Order: deletes first (free disk + clear stale state), then adds and
+    updates. Mutates `state` (the in-memory copy) and writes `state_path`
+    after each successful ROM. Returns aggregated counts.
+
+    `delete_on_remove` controls whether `plan.to_delete` actually executes.
+    When False (the default, mirroring the config default), the planner's
+    delete entries are surfaced informationally but no files move.
     """
     if config.destination is None:
         raise ValueError("execute_plan requires config.destination to be set")
 
     destination = config.destination
     transforms_cfg = config.transforms
+    result = ExecutionResult()
+
+    # Deletes first (only when opted into).
+    pending_deletes = plan.to_delete if delete_on_remove else []
+    delete_total = len(pending_deletes)
+    for index, delete in enumerate(pending_deletes, start=1):
+        prefix = f"[del {index}/{delete_total}]"
+        progress(
+            f"{prefix} trashing {delete.name} ({delete.platform_slug}, rom_id={delete.rom_id})"
+        )
+        try:
+            trash_dir = _execute_delete(
+                action=delete,
+                destination=destination,
+                trash_root=trash_root,
+            )
+        except Exception as e:
+            logger.exception("delete failed for rom %d", delete.rom_id)
+            progress(f"{prefix}   ✗ {type(e).__name__}: {e}")
+            result.failed.append(
+                RomFailure(
+                    rom_id=delete.rom_id,
+                    name=delete.name,
+                    platform_slug=delete.platform_slug,
+                    error=f"{type(e).__name__}: {e}",
+                )
+            )
+            continue
+        state.roms.pop(delete.rom_id, None)
+        save_state(state, state_path)
+        result.deleted.append(
+            RomDeletion(
+                rom_id=delete.rom_id,
+                name=delete.name,
+                platform_slug=delete.platform_slug,
+                trash_dir=trash_dir,
+            )
+        )
+        progress(f"{prefix}   ✓ moved to {trash_dir}")
 
     actions: list[AddAction | UpdateAction] = [*plan.to_add, *plan.to_update]
     total = len(actions)
-    result = ExecutionResult(skipped_deletes=len(plan.to_delete))
 
     for index, action in enumerate(actions, start=1):
         prefix = f"[{index}/{total}]"
@@ -111,6 +165,7 @@ def execute_plan(
                 transforms_cfg=transforms_cfg,
                 api=api,
                 scratch_root=scratch_root,
+                trash_root=trash_root,
             )
         except RommApiError as e:
             logger.warning("rom %d failed: %s", action.rom_id, e)
@@ -160,6 +215,27 @@ def execute_plan(
     return result
 
 
+def _execute_delete(
+    *,
+    action: DeleteAction,
+    destination: Destination,
+    trash_root: Path,
+) -> Path:
+    """Move all of *action.previous*'s outputs + sidecar to the trash dir."""
+    rom = action.previous
+    paths: list[Path] = [destination.roms_base / o.path for o in rom.outputs]
+    primary_abs = destination.roms_base / rom.primary_output.path
+    sidecar = sidecar_path_for(primary_abs)
+    if sidecar.exists():
+        paths.append(sidecar)
+    return trash_paths(
+        paths,
+        rom.rom_id,
+        trash_root=trash_root,
+        roms_base=destination.roms_base,
+    )
+
+
 def _execute_one(
     *,
     action: AddAction | UpdateAction,
@@ -167,6 +243,7 @@ def _execute_one(
     transforms_cfg: TransformsConfig,
     api: RommApi,
     scratch_root: Path,
+    trash_root: Path,
 ) -> RomState:
     rom_data = action.rom_data
     rom_id = action.rom_id
@@ -208,6 +285,8 @@ def _execute_one(
                 previous=previous,
                 roms_base=destination.roms_base,
                 new_outputs=pipeline_outputs,
+                trash_root=trash_root,
+                rom_id=rom_id,
             )
 
         outputs = tuple(
@@ -246,17 +325,27 @@ def _cleanup_orphans(
     previous: RomState,
     roms_base: Path,
     new_outputs: list[Path],
+    trash_root: Path,
+    rom_id: int,
 ) -> None:
-    """Delete files from the previous state that aren't in the new output set."""
-    new_set = set(new_outputs)
-    # Always remove the old sidecar; we'll write a fresh one at the new primary.
-    old_primary = roms_base / previous.outputs[previous.primary_output_index].path
-    sidecar_path_for(old_primary).unlink(missing_ok=True)
+    """Trash files from the previous state that aren't in the new output set.
 
+    Uses the same trash dir as DeleteAction so a single timestamped entry
+    holds everything from one update event. Stale sidecar always trashed
+    too — we'll write a fresh one at the new primary.
+    """
+    new_set = set(new_outputs)
+    to_trash: list[Path] = []
+    old_primary = roms_base / previous.outputs[previous.primary_output_index].path
+    old_sidecar = sidecar_path_for(old_primary)
+    if old_sidecar.exists():
+        to_trash.append(old_sidecar)
     for old in previous.outputs:
         old_abs = roms_base / old.path
-        if old_abs not in new_set:
-            old_abs.unlink(missing_ok=True)
+        if old_abs not in new_set and old_abs.exists():
+            to_trash.append(old_abs)
+    if to_trash:
+        trash_paths(to_trash, rom_id, trash_root=trash_root, roms_base=roms_base)
 
 
 def _hash_file(path: Path) -> str:

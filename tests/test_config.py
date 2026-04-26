@@ -328,6 +328,52 @@ def test_sync_primary_version_only_parses(tmp_path: Path) -> None:
     assert loaded.config.sync.primary_version_only is True
 
 
+def test_sync_delete_on_remove_defaults_false(tmp_path: Path) -> None:
+    """Less-surprising default — first sync against stale state can't silently trash."""
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.sync is not None
+    assert loaded.config.sync.delete_on_remove is False
+    assert loaded.config.sync.trash_retention_days == 14
+
+
+def test_sync_delete_on_remove_opt_in(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml()
+        + "\n[sync]\n"
+        + 'collection = "Steam Deck"\n'
+        + "delete_on_remove = true\n"
+        + "trash_retention_days = 30\n",
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.sync is not None
+    assert loaded.config.sync.delete_on_remove is True
+    assert loaded.config.sync.trash_retention_days == 30
+
+
+def test_sync_trash_retention_must_be_non_negative(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\ntrash_retention_days = -1\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="non-negative"):
+        load_config(cfg_file, env={})
+
+
+def test_sync_trash_retention_must_be_int_not_bool(tmp_path: Path) -> None:
+    """Booleans are int subclasses in Python — guard against `true` as days."""
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\ntrash_retention_days = true\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="non-negative"):
+        load_config(cfg_file, env={})
+
+
 def test_sync_unknown_key_raises(tmp_path: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",

@@ -115,11 +115,12 @@ def test_add_action_with_unzip_extracts_and_records_state(tmp_path: Path) -> Non
             state=state,
             state_path=state_path,
             scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
         )
 
     assert len(result.succeeded) == 1
     assert result.failed == []
-    assert result.skipped_deletes == 0
+    assert result.deleted == []
 
     # File extracted to the right place.
     assert (tmp_path / "ROMs" / "gc" / "Game.iso").read_bytes() == b"iso-bytes"
@@ -183,6 +184,7 @@ def test_add_action_with_no_transforms_passes_source_through(tmp_path: Path) -> 
             state=state,
             state_path=state_path,
             scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
         )
     assert len(result.succeeded) == 1
     landed = tmp_path / "ROMs" / "gc" / "DemoRom.iso"
@@ -231,6 +233,7 @@ def test_multi_output_zip_picks_cue_as_primary(tmp_path: Path) -> None:
             state=state,
             state_path=state_path,
             scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
         )
 
     persisted = load_state(state_path)
@@ -317,6 +320,7 @@ def test_update_action_cleans_up_old_outputs_with_changed_filename(
             state=state,
             state_path=state_path,
             scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
         )
 
     assert len(result.succeeded) == 1
@@ -381,6 +385,7 @@ def test_state_persisted_after_each_rom(tmp_path: Path) -> None:
             state=state,
             state_path=state_path,
             scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
         )
 
     assert len(result.succeeded) == 1
@@ -431,6 +436,7 @@ def test_failed_rom_leaves_scratch_for_debug(tmp_path: Path) -> None:
             state=state,
             state_path=state_path,
             scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
         )
 
     assert result.failed[0].rom_id == 9
@@ -439,14 +445,22 @@ def test_failed_rom_leaves_scratch_for_debug(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Skipped deletes
+# DeleteAction execution — soft-delete to trash
 # ---------------------------------------------------------------------------
 
 
-def test_deletes_are_counted_as_skipped(tmp_path: Path, make_rom) -> None:
-    """`to_delete` items are surfaced via skipped_deletes; no FS work."""
+def test_delete_action_moves_outputs_and_sidecar_to_trash(tmp_path: Path, make_rom) -> None:
     config = make_config(tmp_path)
-    state = LibraryState(roms={5: make_rom(rom_id=5)})
+    # Set up the on-disk state: primary file + sidecar.
+    primary = tmp_path / "ROMs" / "gc" / "Pikmin.iso"
+    primary.parent.mkdir(parents=True)
+    primary.write_bytes(b"iso-bytes")
+    rom = make_rom(rom_id=5, name="Pikmin")
+    from ferry.adapters.sidecar import sidecar_path_for, write_sidecar
+
+    write_sidecar(primary, rom)
+
+    state = LibraryState(roms={5: rom})
     state_path = tmp_path / "state.json"
     plan = SyncPlan(
         to_add=[],
@@ -454,16 +468,15 @@ def test_deletes_are_counted_as_skipped(tmp_path: Path, make_rom) -> None:
         to_delete=[
             DeleteAction(
                 rom_id=5,
-                name="Removed",
+                name="Pikmin",
                 platform_slug="gc",
-                previous=state.roms[5],
+                previous=rom,
                 reason="no longer in collection",
             )
         ],
         unchanged_count=0,
     )
 
-    # No HTTP needed since there are no add/update actions.
     with RommHttpAdapter(config.romm) as http:
         api = RommApi(http)
         result = execute_plan(
@@ -473,10 +486,72 @@ def test_deletes_are_counted_as_skipped(tmp_path: Path, make_rom) -> None:
             state=state,
             state_path=state_path,
             scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
+            delete_on_remove=True,
         )
     assert result.succeeded == []
     assert result.failed == []
-    assert result.skipped_deletes == 1
+    assert len(result.deleted) == 1
+    assert result.deleted[0].rom_id == 5
+
+    # Files are gone from roms_base.
+    assert not primary.exists()
+    assert not sidecar_path_for(primary).exists()
+
+    # Files are in the trash, with the gc/ subdir preserved.
+    trash_dir = result.deleted[0].trash_dir
+    assert (trash_dir / "gc" / "Pikmin.iso").read_bytes() == b"iso-bytes"
+    assert (trash_dir / "gc" / "Pikmin.iso.ferry.json").exists()
+
+    # State no longer mentions the rom.
+    from ferry.adapters.state_store import load_state
+
+    persisted = load_state(state_path)
+    assert 5 not in persisted.roms
+
+
+def test_delete_on_remove_false_keeps_files_on_disk(tmp_path: Path, make_rom) -> None:
+    """Even with `to_delete` populated, executor leaves files alone when flag is off."""
+    config = make_config(tmp_path)
+    primary = tmp_path / "ROMs" / "gc" / "Pikmin.iso"
+    primary.parent.mkdir(parents=True)
+    primary.write_bytes(b"iso-bytes")
+    rom = make_rom(rom_id=5)
+    state = LibraryState(roms={5: rom})
+    state_path = tmp_path / "state.json"
+    plan = SyncPlan(
+        to_add=[],
+        to_update=[],
+        to_delete=[
+            DeleteAction(
+                rom_id=5,
+                name="Pikmin",
+                platform_slug="gc",
+                previous=rom,
+                reason="no longer in collection",
+            )
+        ],
+        unchanged_count=0,
+    )
+
+    with RommHttpAdapter(config.romm) as http:
+        api = RommApi(http)
+        result = execute_plan(
+            plan=plan,
+            config=config,
+            api=api,
+            state=state,
+            state_path=state_path,
+            scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
+            delete_on_remove=False,  # explicit
+        )
+    assert result.deleted == []
+    assert result.succeeded == []
+    assert result.failed == []
+    # File still on disk; state still has the rom.
+    assert primary.read_bytes() == b"iso-bytes"
+    assert 5 in state.roms
 
 
 # ---------------------------------------------------------------------------

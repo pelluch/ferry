@@ -31,6 +31,7 @@ from ferry.services.sync_executor import (
     default_scratch_root,
     execute_plan,
 )
+from ferry.services.trash import default_trash_root, purge_expired
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
                 regenerated = ensure_sidecars(state, config.destination)
                 if regenerated:
                     click.echo(f"regenerated {regenerated} missing sidecar(s) from state")
+            trash_root = default_trash_root()
             plan = compute_plan(
                 current_roms=current_roms,
                 state=state,
@@ -105,10 +107,30 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
                 _print_plan(plan, full=full, config=config)
                 return
 
+            # Purge expired trash *only* on the real-run path. Dry-run must
+            # never modify state, including trash entries.
+            purged = purge_expired(trash_root, sync_cfg.trash_retention_days)
+            if purged:
+                click.echo(
+                    f"purged {purged} trash entr"
+                    f"{'y' if purged == 1 else 'ies'} older than "
+                    f"{sync_cfg.trash_retention_days} days"
+                )
+
             _print_plan_summary(plan)
-            if plan.is_empty:
+            will_act = bool(
+                plan.to_add or plan.to_update or (plan.to_delete and sync_cfg.delete_on_remove)
+            )
+            if not will_act:
                 click.echo("")
-                click.echo("Nothing to do — local state matches RomM.")
+                if plan.is_empty:
+                    click.echo("Nothing to do — local state matches RomM.")
+                else:
+                    click.echo(
+                        f"Nothing to execute — {len(plan.to_delete)} ROM(s) no "
+                        "longer in collection ([sync].delete_on_remove = false)."
+                    )
+                    click.echo("Set delete_on_remove = true in your config to trash them.")
                 return
 
             click.echo("")
@@ -122,6 +144,8 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
                 state=state,
                 state_path=state_path,
                 scratch_root=scratch_root,
+                trash_root=trash_root,
+                delete_on_remove=sync_cfg.delete_on_remove,
                 progress=click.echo,
             )
             _print_execution_summary(plan, result)
@@ -166,7 +190,15 @@ def _print_plan(plan: SyncPlan, *, full: bool, config: Config) -> None:
     cap = None if full else _DEFAULT_PREVIEW
     _print_section("To add", plan.to_add, "+", cap, config)
     _print_section("To update", plan.to_update, "↻", cap, config)
-    _print_section("To delete", plan.to_delete, "-", cap, config)
+
+    if plan.to_delete:
+        delete_active = bool(config.sync and config.sync.delete_on_remove)
+        title = (
+            "To delete"
+            if delete_active
+            else "No longer in collection (would trash if `[sync].delete_on_remove = true`)"
+        )
+        _print_section(title, plan.to_delete, "-", cap, config)
 
     click.echo("")
     if plan.is_empty:
@@ -223,23 +255,19 @@ def _print_execution_summary(plan: SyncPlan, result: ExecutionResult) -> None:
     click.echo("")
     click.echo("Sync complete:")
     click.echo(f"  Synced:  {len(result.succeeded)}")
+    click.echo(f"  Deleted: {len(result.deleted)}")
     click.echo(f"  Failed:  {len(result.failed)}")
-    if result.skipped_deletes:
-        click.echo(
-            f"  Pending deletes: {result.skipped_deletes} "
-            f"(delete-on-remove not yet implemented; ROMs remain on disk)"
-        )
     if result.failed:
         click.echo("")
         click.echo("Failures:")
         for f in result.failed:
             click.echo(f"  ✗ {f.name} ({f.platform_slug}, rom_id={f.rom_id}): {f.error}")
         click.echo("")
-        click.echo("Re-running sync will retry failed ROMs as they're still in `to_add`.")
-    if plan.to_delete:
+        click.echo("Re-running sync will retry failed actions.")
+    if result.deleted:
         click.echo("")
-        click.echo("ROMs no longer in collection (would delete):")
-        for d in plan.to_delete[:_DEFAULT_PREVIEW]:
-            click.echo(f"  - {d.name} ({d.platform_slug}, rom_id={d.rom_id})")
-        if len(plan.to_delete) > _DEFAULT_PREVIEW:
-            click.echo(f"  ... and {len(plan.to_delete) - _DEFAULT_PREVIEW} more")
+        click.echo("Trashed ROMs (recoverable until retention expires):")
+        for d in result.deleted[:_DEFAULT_PREVIEW]:
+            click.echo(f"  - {d.name} ({d.platform_slug}, rom_id={d.rom_id}) → {d.trash_dir}")
+        if len(result.deleted) > _DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(result.deleted) - _DEFAULT_PREVIEW} more")

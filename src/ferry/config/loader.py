@@ -16,7 +16,9 @@ ENV_CONFIG_PATH = "FERRY_CONFIG"
 _TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync", "transforms"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
 _DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
-_SYNC_KEYS = frozenset({"collection", "primary_version_only"})
+_SYNC_KEYS = frozenset(
+    {"collection", "primary_version_only", "delete_on_remove", "trash_retention_days"}
+)
 _TRANSFORMS_PLATFORM_KEYS = frozenset({"pipeline"})
 
 
@@ -144,7 +146,22 @@ def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:
     if not isinstance(primary, bool):
         raise ConfigInvalidError(f"[sync].primary_version_only must be a boolean in {path}")
 
-    return SyncConfig(collection=collection, primary_version_only=primary)
+    delete_on_remove = sync.get("delete_on_remove", False)
+    if not isinstance(delete_on_remove, bool):
+        raise ConfigInvalidError(f"[sync].delete_on_remove must be a boolean in {path}")
+
+    retention = sync.get("trash_retention_days", 14)
+    if not isinstance(retention, int) or isinstance(retention, bool) or retention < 0:
+        raise ConfigInvalidError(
+            f"[sync].trash_retention_days must be a non-negative integer in {path}"
+        )
+
+    return SyncConfig(
+        collection=collection,
+        primary_version_only=primary,
+        delete_on_remove=delete_on_remove,
+        trash_retention_days=retention,
+    )
 
 
 def _parse_transforms(raw: dict, path: Path) -> TransformsConfig:

@@ -379,14 +379,46 @@ def test_sync_idempotent_second_run_is_a_no_op(tmp_path: Path, monkeypatch) -> N
 
 
 @respx.mock
-def test_sync_surfaces_pending_deletes_without_executing_them(tmp_path: Path, monkeypatch) -> None:
-    """ROMs in state but not in current listing are surfaced; files stay on disk."""
+def test_dry_run_does_not_purge_trash(tmp_path: Path, monkeypatch) -> None:
+    """`--dry-run` must never touch disk state, including the trash."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = write_config(tmp_path / "config.toml")
+
+    # Pre-seed trash with an entry that's well past retention.
+    trash_root = tmp_path / ".local" / "state" / "ferry" / "trash"
+    trash_root.mkdir(parents=True)
+    ancient_entry = trash_root / "20200101T000000Z__rom42"
+    ancient_entry.mkdir()
+
+    mock_endpoints(collections=[{"id": 6, "name": "Steam Deck"}], rom_items=[])
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    # Old trash entry survives — dry-run made no changes.
+    assert ancient_entry.exists()
+
+
+@respx.mock
+def test_sync_executes_deletes_and_moves_to_trash(tmp_path: Path, monkeypatch) -> None:
+    """ROMs in state but not in current listing get soft-deleted to trash."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     roms_base = tmp_path / "myroms"
-    cfg = write_config(tmp_path / "config.toml", roms_base=roms_base)
+    # delete_on_remove defaults to False; opt in for this test.
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[romm]\n"
+        f'url = "{BASE_URL}"\n'
+        'api_key = "rmm_abcdef0123456789"\n'
+        "\n[destination]\n"
+        f'roms_base = "{roms_base}"\n'
+        "\n[sync]\n"
+        'collection = "Steam Deck"\n'
+        "delete_on_remove = true\n"
+    )
 
-    # Pre-seed a state with a rom that's "missing" from the current listing.
+    from ferry.adapters.sidecar import sidecar_path_for, write_sidecar
     from ferry.adapters.state_store import default_state_path, save_state
     from ferry.domain.state import LibraryState, RomState, TransformedOutput
 
@@ -408,19 +440,76 @@ def test_sync_surfaces_pending_deletes_without_executing_them(tmp_path: Path, mo
     leftover_file = roms_base / "gc" / "Leftover.iso"
     leftover_file.parent.mkdir(parents=True)
     leftover_file.write_bytes(b"still-here")
+    write_sidecar(leftover_file, leftover_rom)
 
     mock_endpoints(
         collections=[{"id": 6, "name": "Steam Deck"}],
-        rom_items=[],  # nothing in collection now
+        rom_items=[],
     )
 
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "sync"], env={})
     assert result.exit_code == 0, result.output
-    assert "Pending deletes: 1" in result.output
-    assert "delete-on-remove not yet implemented" in result.output
-    # File still on disk.
-    assert leftover_file.exists()
+    assert "Deleted: 1" in result.output
+    assert "Trashed ROMs" in result.output
+    # File and sidecar moved out of roms_base.
+    assert not leftover_file.exists()
+    assert not sidecar_path_for(leftover_file).exists()
+    # Trash dir holds the same layout.
+    trash_root = tmp_path / ".local" / "state" / "ferry" / "trash"
+    trash_entries = list(trash_root.iterdir())
+    assert len(trash_entries) == 1
+    assert (trash_entries[0] / "gc" / "Leftover.iso").read_bytes() == b"still-here"
+
+
+@respx.mock
+def test_sync_with_delete_on_remove_false_keeps_files(tmp_path: Path, monkeypatch) -> None:
+    """delete_on_remove=false means the planner doesn't generate DeleteAction."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    roms_base = tmp_path / "myroms"
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[romm]\n"
+        f'url = "{BASE_URL}"\n'
+        'api_key = "rmm_abcdef0123456789"\n'
+        "\n[destination]\n"
+        f'roms_base = "{roms_base}"\n'
+        "\n[sync]\n"
+        'collection = "Steam Deck"\n'
+        "delete_on_remove = false\n"
+    )
+
+    from ferry.adapters.state_store import default_state_path, save_state
+    from ferry.domain.state import LibraryState, RomState, TransformedOutput
+
+    rom = RomState(
+        rom_id=42,
+        platform_slug="gc",
+        name="Untouched",
+        source_filename="Untouched.zip",
+        source_md5="abc",
+        source_size=10,
+        source_updated_at="2026-01-01T00:00:00Z",
+        transforms=(),
+        outputs=(TransformedOutput(path="gc/Untouched.iso", md5="x", size=5),),
+        primary_output_index=0,
+        synced_at="2026-01-01T00:00:01Z",
+    )
+    save_state(LibraryState(roms={42: rom}), default_state_path())
+    f = roms_base / "gc" / "Untouched.iso"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"keep")
+
+    mock_endpoints(collections=[{"id": 6, "name": "Steam Deck"}], rom_items=[])
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync"], env={})
+    assert result.exit_code == 0, result.output
+    # Planner surfaces the no-longer-in-collection rom; executor suppresses.
+    assert "Delete:     1" in result.output
+    assert "Nothing to execute" in result.output
+    assert "delete_on_remove = true" in result.output
+    assert f.exists()  # still here
 
 
 @respx.mock

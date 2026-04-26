@@ -16,6 +16,12 @@ class SyncConfig:
 
     collection: str
     primary_version_only: bool = False
+    # Defaults to False so a first sync against a stale state can never silently
+    # trash files. Users opt into mirror semantics explicitly when they're
+    # confident the local state matches what they want RomM to authoritatively
+    # govern.
+    delete_on_remove: bool = False
+    trash_retention_days: int = 14
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

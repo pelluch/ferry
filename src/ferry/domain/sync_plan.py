@@ -76,12 +76,18 @@ def compute_plan(
     current_roms: list[dict[str, Any]],
     state: LibraryState,
     destination: Destination | None = None,
-    delete_on_remove: bool = True,
 ) -> SyncPlan:
     """Diff *current_roms* (from RomM) against *state* (last sync's record).
 
     Returns a SyncPlan with per-rom decisions. Output is stable: actions
     within each list are sorted by `name`.
+
+    The planner always populates `to_delete` for ROMs that exist in state
+    but not in the current listing — this is informational. Whether those
+    deletions actually execute is a *runtime* decision controlled by
+    `[sync].delete_on_remove` and applied in the executor, not here. That
+    keeps `--dry-run` honest about what's no longer in the collection
+    regardless of the user's safety preference.
 
     When `destination` is provided, the planner additionally stats each
     "unchanged" ROM's primary output. Missing-on-disk primaries are
@@ -89,10 +95,6 @@ def compute_plan(
     where the user manually deleted files from the ROM tree and expects
     `ferry sync` to put them back. When `destination` is None (e.g. unit
     tests), the check is skipped and `updated_at` matches mean unchanged.
-
-    Set `delete_on_remove=False` to suppress the `to_delete` list (the
-    design keeps this configurable; users opt out if they want ferry to be
-    additive only).
     """
     to_add: list[AddAction] = []
     to_update: list[UpdateAction] = []
@@ -151,18 +153,17 @@ def compute_plan(
         else:
             unchanged += 1
 
-    if delete_on_remove:
-        for rom_id, prev in state.roms.items():
-            if rom_id not in current_ids:
-                to_delete.append(
-                    DeleteAction(
-                        rom_id=rom_id,
-                        name=prev.name,
-                        platform_slug=prev.platform_slug,
-                        previous=prev,
-                        reason="no longer in collection",
-                    )
+    for rom_id, prev in state.roms.items():
+        if rom_id not in current_ids:
+            to_delete.append(
+                DeleteAction(
+                    rom_id=rom_id,
+                    name=prev.name,
+                    platform_slug=prev.platform_slug,
+                    previous=prev,
+                    reason="no longer in collection",
                 )
+            )
 
     to_add.sort(key=lambda a: (a.name, a.rom_id))
     to_update.sort(key=lambda a: (a.name, a.rom_id))
