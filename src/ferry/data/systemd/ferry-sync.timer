@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodic ferry sync of RomM library
+
+[Timer]
+# Default cadence. `ferry install-units --schedule SPEC` rewrites this line
+# in the installed copy under ~/.config/systemd/user/.
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+Unit=ferry-sync.service
+
+[Install]
+WantedBy=timers.target
