@@ -9,14 +9,21 @@ from ferry.adapters.romm import (
     RommAuthError,
     RommHttpAdapter,
 )
-from ferry.adapters.state_store import load_state
+from ferry.adapters.state_store import default_state_path, load_state
 from ferry.config import ConfigError, SyncConfig, load_config
+from ferry.config.schema import Config
+from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.sync_plan import (
     AddAction,
     DeleteAction,
     SyncPlan,
     UpdateAction,
     compute_plan,
+)
+from ferry.services.sync_executor import (
+    ExecutionResult,
+    default_scratch_root,
+    execute_plan,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,16 +41,11 @@ _DEFAULT_PREVIEW = 20
 @click.option(
     "--full",
     is_flag=True,
-    help="Print every entry in each section instead of truncating.",
+    help="Print every entry in each section instead of truncating (dry-run only).",
 )
 @click.pass_context
 def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
     """Sync the configured collection from RomM to the destination."""
-    if not dry_run:
-        raise click.ClickException(
-            "execution lands in a later checkpoint; pass --dry-run to preview the plan."
-        )
-
     try:
         loaded = load_config(ctx.obj.get("config_path"))
     except ConfigError as e:
@@ -74,16 +76,41 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
                 primary_only=sync_cfg.primary_version_only,
             )
             click.echo(f"✓ {len(current_roms)} ROM(s) returned")
+
+            state_path = default_state_path()
+            state = load_state(state_path)
+            plan = compute_plan(current_roms=current_roms, state=state)
+
+            if dry_run:
+                _print_plan(plan, full=full, config=config)
+                return
+
+            _print_plan_summary(plan)
+            if plan.is_empty:
+                click.echo("")
+                click.echo("Nothing to do — local state matches RomM.")
+                return
+
+            click.echo("")
+            click.echo("Executing plan…")
+            click.echo("")
+            scratch_root = default_scratch_root()
+            result = execute_plan(
+                plan=plan,
+                config=config,
+                api=api,
+                state=state,
+                state_path=state_path,
+                scratch_root=scratch_root,
+                progress=click.echo,
+            )
+            _print_execution_summary(plan, result)
     except RommAuthError as e:
         raise click.ClickException(
             f"{e}\n\ncheck the API key — it may be expired or revoked."
         ) from e
     except RommApiError as e:
         raise click.ClickException(str(e)) from e
-
-    state = load_state()
-    plan = compute_plan(current_roms=current_roms, state=state)
-    _print_plan(plan, full=full)
 
 
 def _resolve_collection(api: RommApi, name: str) -> dict[str, Any]:
@@ -104,7 +131,7 @@ def _resolve_collection(api: RommApi, name: str) -> dict[str, Any]:
     return matches[0]
 
 
-def _print_plan(plan: SyncPlan, *, full: bool) -> None:
+def _print_plan_summary(plan: SyncPlan) -> None:
     click.echo("")
     click.echo("Sync plan:")
     click.echo(f"  Add:        {len(plan.to_add)}")
@@ -112,10 +139,14 @@ def _print_plan(plan: SyncPlan, *, full: bool) -> None:
     click.echo(f"  Delete:     {len(plan.to_delete)}")
     click.echo(f"  Unchanged:  {plan.unchanged_count}")
 
+
+def _print_plan(plan: SyncPlan, *, full: bool, config: Config) -> None:
+    _print_plan_summary(plan)
+
     cap = None if full else _DEFAULT_PREVIEW
-    _print_section("To add", plan.to_add, "+", cap)
-    _print_section("To update", plan.to_update, "↻", cap)
-    _print_section("To delete", plan.to_delete, "-", cap)
+    _print_section("To add", plan.to_add, "+", cap, config)
+    _print_section("To update", plan.to_update, "↻", cap, config)
+    _print_section("To delete", plan.to_delete, "-", cap, config)
 
     click.echo("")
     if plan.is_empty:
@@ -129,6 +160,7 @@ def _print_section(
     items: list[AddAction] | list[UpdateAction] | list[DeleteAction],
     sigil: str,
     cap: int | None,
+    config: Config,
 ) -> None:
     if not items:
         return
@@ -136,6 +168,58 @@ def _print_section(
     click.echo(f"{title} ({len(items)}):")
     shown = items if cap is None else items[:cap]
     for a in shown:
-        click.echo(f"  {sigil} {a.name} ({a.platform_slug}, rom_id={a.rom_id}) — {a.reason}")
+        line = f"  {sigil} {a.name} ({a.platform_slug}, rom_id={a.rom_id})"
+        details = _format_action_destination(a, config)
+        if details:
+            line += f" → {details}"
+        click.echo(line)
     if cap is not None and len(items) > cap:
         click.echo(f"  ... and {len(items) - cap} more (run with --full to list all)")
+
+
+def _format_action_destination(
+    action: AddAction | UpdateAction | DeleteAction,
+    config: Config,
+) -> str:
+    """Render the on-disk path + pipeline summary for a planned action."""
+    if config.destination is None:  # guarded earlier; defensive
+        return ""
+    roms_base = config.destination.roms_base
+
+    if isinstance(action, DeleteAction):
+        # Show the existing primary output so the user knows what would go.
+        primary = action.previous.outputs[action.previous.primary_output_index]
+        return str(roms_base / primary.path)
+
+    # Add / Update: source filename → resolved platform dir
+    fs_name = action.rom_data.get("fs_name") or f"rom-{action.rom_id}"
+    platform_dir = roms_base / resolve_platform_dir(action.platform_slug)
+    pipeline = config.transforms.for_platform(action.platform_slug)
+    pipeline_str = f" [{' → '.join(pipeline)}]" if pipeline else ""
+    return f"{platform_dir / fs_name}{pipeline_str}"
+
+
+def _print_execution_summary(plan: SyncPlan, result: ExecutionResult) -> None:
+    click.echo("")
+    click.echo("Sync complete:")
+    click.echo(f"  Synced:  {len(result.succeeded)}")
+    click.echo(f"  Failed:  {len(result.failed)}")
+    if result.skipped_deletes:
+        click.echo(
+            f"  Pending deletes: {result.skipped_deletes} "
+            f"(delete-on-remove not yet implemented; ROMs remain on disk)"
+        )
+    if result.failed:
+        click.echo("")
+        click.echo("Failures:")
+        for f in result.failed:
+            click.echo(f"  ✗ {f.name} ({f.platform_slug}, rom_id={f.rom_id}): {f.error}")
+        click.echo("")
+        click.echo("Re-running sync will retry failed ROMs as they're still in `to_add`.")
+    if plan.to_delete:
+        click.echo("")
+        click.echo("ROMs no longer in collection (would delete):")
+        for d in plan.to_delete[:_DEFAULT_PREVIEW]:
+            click.echo(f"  - {d.name} ({d.platform_slug}, rom_id={d.rom_id})")
+        if len(plan.to_delete) > _DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(plan.to_delete) - _DEFAULT_PREVIEW} more")

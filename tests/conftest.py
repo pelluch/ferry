@@ -7,6 +7,12 @@ import pytest
 from ferry.domain.state import RomState, TransformedOutput
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip RommHttpAdapter's retry backoff so tests don't pay 1s+3s+9s."""
+    monkeypatch.setattr("ferry.adapters.romm.http.time.sleep", lambda *_: None)
+
+
 @pytest.fixture
 def make_output() -> Callable[..., TransformedOutput]:
     def _make(path: str = "gc/Pikmin.iso") -> TransformedOutput:

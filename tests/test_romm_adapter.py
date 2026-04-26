@@ -25,12 +25,6 @@ def make_config(*, allow_insecure_ssl: bool = False) -> RommConfig:
     return RommConfig(url=BASE_URL, api_key=API_KEY, allow_insecure_ssl=allow_insecure_ssl)
 
 
-@pytest.fixture(autouse=True)
-def no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skip retry backoff sleeps so tests run instantly."""
-    monkeypatch.setattr("ferry.adapters.romm.http.time.sleep", lambda *_: None)
-
-
 # ---------------------------------------------------------------------------
 # RommHttpAdapter — get_json
 # ---------------------------------------------------------------------------
