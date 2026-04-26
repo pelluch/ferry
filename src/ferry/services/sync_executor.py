@@ -183,7 +183,15 @@ def _execute_one(
     try:
         source_path = rom_scratch / fs_name
         download_result = api.download_rom(rom_id, fs_name, source_path)
-        _maybe_warn_hash_mismatch(rom_data, download_result.md5)
+        # Note: we don't cross-check `download_result.md5` against
+        # rom_data.get("md5_hash") even when RomM provides one. RomM
+        # decompresses archives before hashing (its scanner reads zip/tar/
+        # gz/7z contents), so RomM's md5 is over the *underlying ROM bytes*
+        # while ours is over the *as-served bytes* (often a zip wrapper).
+        # They're different by design. Real integrity verification would need
+        # to hash post-unzip outputs and compare to RomM's hash — only
+        # meaningful when unzip is configured. Future work; not load-bearing
+        # for v1.
 
         platform_dir = destination.roms_base / resolve_platform_dir(platform)
         pipeline_scratch = rom_scratch / "pipeline"
@@ -267,17 +275,6 @@ def _pick_primary_index(outputs: list[Path]) -> int:
             if p.suffix.lower() == ext:
                 return i
     return 0
-
-
-def _maybe_warn_hash_mismatch(rom_data: dict, our_md5: str) -> None:
-    advertised = rom_data.get("md5_hash")
-    if advertised and isinstance(advertised, str) and advertised.lower() != our_md5.lower():
-        logger.warning(
-            "rom %s: md5 mismatch — RomM advertised %s, we got %s",
-            rom_data.get("id"),
-            advertised,
-            our_md5,
-        )
 
 
 def _format_bytes(n: int) -> str:

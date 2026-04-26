@@ -9,7 +9,13 @@ from ferry.adapters.romm import (
     RommAuthError,
     RommHttpAdapter,
 )
-from ferry.adapters.state_store import default_state_path, load_state
+from ferry.adapters.state_store import (
+    default_state_path,
+    ensure_sidecars,
+    load_state,
+    recover_state_from_sidecars,
+    save_state,
+)
 from ferry.config import ConfigError, SyncConfig, load_config
 from ferry.config.schema import Config
 from ferry.domain.platforms import resolve_platform_dir
@@ -79,7 +85,21 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
 
             state_path = default_state_path()
             state = load_state(state_path)
-            plan = compute_plan(current_roms=current_roms, state=state)
+            if not state.roms and config.destination is not None:
+                recovered = recover_state_from_sidecars([config.destination.roms_base])
+                if recovered.roms:
+                    click.echo(f"recovered {len(recovered.roms)} ROM(s) from on-disk sidecars")
+                    state = recovered
+                    save_state(state, state_path)
+            if config.destination is not None:
+                regenerated = ensure_sidecars(state, config.destination)
+                if regenerated:
+                    click.echo(f"regenerated {regenerated} missing sidecar(s) from state")
+            plan = compute_plan(
+                current_roms=current_roms,
+                state=state,
+                destination=config.destination,
+            )
 
             if dry_run:
                 _print_plan(plan, full=full, config=config)

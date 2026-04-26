@@ -1,6 +1,7 @@
 """Shared pytest fixtures."""
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,25 @@ from ferry.domain.state import RomState, TransformedOutput
 def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skip RommHttpAdapter's retry backoff so tests don't pay 1s+3s+9s."""
     monkeypatch.setattr("ferry.adapters.romm.http.time.sleep", lambda *_: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Redirect $HOME to a fresh tmp dir so tests never read or write the developer's
+    real state.json, scratch cache, or `~/.config/ferry/`. XDG_* vars are *unset* so
+    that HOME-derived fallback paths apply — tests that override HOME via their own
+    monkeypatch automatically redirect XDG-style paths through the new HOME.
+    """
+    home = tmp_path_factory.mktemp("isolated-home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("FERRY_CONFIG", raising=False)
+    monkeypatch.delenv("FERRY_ROMM_API_KEY", raising=False)
+    return home
 
 
 @pytest.fixture

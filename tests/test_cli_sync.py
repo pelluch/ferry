@@ -424,6 +424,62 @@ def test_sync_surfaces_pending_deletes_without_executing_them(tmp_path: Path, mo
 
 
 @respx.mock
+def test_sync_recovers_state_from_sidecars_when_state_json_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """User deleted state.json but kept ROM files + sidecars → recovery on next sync."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    roms_base = tmp_path / "ROMs"
+    cfg = write_config(tmp_path / "config.toml", roms_base=roms_base)
+
+    # Simulate a previous sync: ROM file exists with a sidecar; no state.json.
+    from ferry.adapters.sidecar import write_sidecar
+    from ferry.domain.state import RomState, TransformedOutput
+
+    primary = roms_base / "gc" / "Pikmin.iso"
+    primary.parent.mkdir(parents=True)
+    primary.write_bytes(b"pretend-iso")
+    rom_state = RomState(
+        rom_id=101,
+        platform_slug="gc",
+        name="Pikmin",
+        source_filename="Pikmin.zip",
+        source_md5="abc",
+        source_size=100,
+        source_updated_at="2026-04-25T12:00:00Z",
+        transforms=("unzip",),
+        outputs=(TransformedOutput(path="gc/Pikmin.iso", md5="def", size=11),),
+        primary_output_index=0,
+        synced_at="2026-04-25T12:01:00Z",
+    )
+    write_sidecar(primary, rom_state)
+
+    # RomM still has the same rom with the same updated_at → no work.
+    mock_endpoints(
+        collections=[{"id": 6, "name": "Steam Deck"}],
+        rom_items=[
+            {
+                "id": 101,
+                "name": "Pikmin",
+                "platform_slug": "gc",
+                "fs_name": "Pikmin.zip",
+                "updated_at": "2026-04-25T12:00:00Z",
+            }
+        ],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync"], env={})
+    assert result.exit_code == 0, result.output
+    assert "recovered 1 ROM(s) from on-disk sidecars" in result.output
+    assert "Nothing to do" in result.output
+    # State.json now exists (saved after recovery).
+    state_path = tmp_path / ".local" / "state" / "ferry" / "state.json"
+    assert state_path.exists()
+
+
+@respx.mock
 def test_sync_per_rom_failure_continues_with_rest(tmp_path: Path, monkeypatch) -> None:
     """A failed download for one ROM doesn't abort the whole sync."""
     monkeypatch.setenv("HOME", str(tmp_path))

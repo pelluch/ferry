@@ -14,8 +14,10 @@ the state-checkpoint commit message). The hash check is at download time.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from ferry.domain.destination import Destination
 from ferry.domain.state import LibraryState, RomState
 
 
@@ -73,17 +75,24 @@ def compute_plan(
     *,
     current_roms: list[dict[str, Any]],
     state: LibraryState,
+    destination: Destination | None = None,
     delete_on_remove: bool = True,
 ) -> SyncPlan:
     """Diff *current_roms* (from RomM) against *state* (last sync's record).
 
-    Returns a SyncPlan with per-rom decisions. Pure function — no I/O. The
-    output is stable: actions within each list are sorted by `name` (stable
-    against rom_id reshuffling).
+    Returns a SyncPlan with per-rom decisions. Output is stable: actions
+    within each list are sorted by `name`.
 
-    Set `delete_on_remove=False` to suppress the `to_delete` list (the design
-    keeps this configurable; users opt out if they want ferry to be additive
-    only).
+    When `destination` is provided, the planner additionally stats each
+    "unchanged" ROM's primary output. Missing-on-disk primaries are
+    promoted to `to_update` with a re-sync reason — this catches the case
+    where the user manually deleted files from the ROM tree and expects
+    `ferry sync` to put them back. When `destination` is None (e.g. unit
+    tests), the check is skipped and `updated_at` matches mean unchanged.
+
+    Set `delete_on_remove=False` to suppress the `to_delete` list (the
+    design keeps this configurable; users opt out if they want ferry to be
+    additive only).
     """
     to_add: list[AddAction] = []
     to_update: list[UpdateAction] = []
@@ -128,6 +137,17 @@ def compute_plan(
                     ),
                 )
             )
+        elif destination is not None and _primary_missing(prev, destination):
+            to_update.append(
+                UpdateAction(
+                    rom_id=rom_id,
+                    name=name,
+                    platform_slug=platform,
+                    rom_data=rom,
+                    previous=prev,
+                    reason="primary output missing on disk — re-syncing",
+                )
+            )
         else:
             unchanged += 1
 
@@ -159,3 +179,9 @@ def compute_plan(
 def _display_name(rom: dict[str, Any]) -> str:
     """Best-effort human-readable name for a RomM rom row."""
     return rom.get("name") or rom.get("fs_name_no_ext") or rom.get("fs_name") or "?"
+
+
+def _primary_missing(prev: RomState, destination: Destination) -> bool:
+    """Return True when the previously-recorded primary output is gone from disk."""
+    primary_path: Path = destination.roms_base / prev.primary_output.path
+    return not primary_path.exists()

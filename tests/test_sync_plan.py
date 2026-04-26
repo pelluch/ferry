@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from ferry.domain.destination import Destination
 from ferry.domain.state import LibraryState
 from ferry.domain.sync_plan import compute_plan
 
@@ -163,3 +166,60 @@ def test_falls_back_through_name_fields() -> None:
     )
     names = sorted(a.name for a in plan.to_add)
     assert names == ["?", "FromExt"]
+
+
+# ---------------------------------------------------------------------------
+# State-vs-disk drift: primary output missing → re-sync
+# ---------------------------------------------------------------------------
+
+
+def _destination(roms_base: Path) -> Destination:
+    return Destination(roms_base=roms_base, bios_base=None, preset="esde-native")
+
+
+def test_unchanged_promoted_to_update_when_primary_missing(tmp_path: Path, make_rom) -> None:
+    """User deleted files manually → next sync should re-fetch."""
+    state = LibraryState(
+        roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00Z")},
+    )
+    # Default make_rom uses outputs at "gc/Pikmin.iso" — never created on disk.
+    plan = compute_plan(
+        current_roms=[romm_rom(1, updated_at="2026-04-25T12:00:00Z")],
+        state=state,
+        destination=_destination(tmp_path),
+    )
+    assert plan.unchanged_count == 0
+    assert len(plan.to_update) == 1
+    assert "missing on disk" in plan.to_update[0].reason
+
+
+def test_unchanged_stays_unchanged_when_primary_present(tmp_path: Path, make_rom) -> None:
+    state = LibraryState(
+        roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00Z")},
+    )
+    # Create the primary output on disk.
+    primary = tmp_path / "gc" / "Pikmin.iso"
+    primary.parent.mkdir(parents=True)
+    primary.write_bytes(b"data")
+
+    plan = compute_plan(
+        current_roms=[romm_rom(1, updated_at="2026-04-25T12:00:00Z")],
+        state=state,
+        destination=_destination(tmp_path),
+    )
+    assert plan.unchanged_count == 1
+    assert plan.to_update == []
+
+
+def test_no_destination_skips_disk_check(make_rom) -> None:
+    """Without a destination (e.g., unit tests), the planner trusts state."""
+    state = LibraryState(
+        roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00Z")},
+    )
+    plan = compute_plan(
+        current_roms=[romm_rom(1, updated_at="2026-04-25T12:00:00Z")],
+        state=state,
+        # destination=None (default)
+    )
+    assert plan.unchanged_count == 1
+    assert plan.to_update == []
