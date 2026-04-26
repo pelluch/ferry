@@ -169,8 +169,36 @@ def test_list_collections_hits_collections() -> None:
 
 
 # ---------------------------------------------------------------------------
-# RommApi.list_roms_in_collection — pagination + params
+# RommApi.list_roms / list_platforms — pagination, filters
 # ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_list_platforms_hits_platforms() -> None:
+    route = respx.get(f"{BASE_URL}/api/platforms").mock(
+        return_value=httpx.Response(200, json=[{"id": 4, "slug": "gba", "name": "GBA"}])
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        platforms = api.list_platforms()
+    assert platforms == [{"id": 4, "slug": "gba", "name": "GBA"}]
+    assert route.called
+
+
+@respx.mock
+def test_list_roms_with_platform_ids_passes_repeated_query_params() -> None:
+    route = respx.get(f"{BASE_URL}/api/roms").mock(
+        return_value=httpx.Response(
+            200, json={"items": [{"id": 1}], "total": 1, "limit": 10000, "offset": 0}
+        )
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.list_roms(platform_ids=[4, 12])
+    sent = str(route.calls.last.request.url)
+    assert "platform_ids=4" in sent
+    assert "platform_ids=12" in sent
+    assert "collection_id=" not in sent
 
 
 @respx.mock
@@ -188,7 +216,7 @@ def test_list_roms_returns_items_from_single_page() -> None:
     )
     with RommHttpAdapter(make_config()) as http:
         api = RommApi(http)
-        roms = api.list_roms_in_collection(7)
+        roms = api.list_roms(collection_id=7)
     assert [r["id"] for r in roms] == [1, 2, 3]
     assert route.call_count == 1
     sent = route.calls.last.request
@@ -226,7 +254,7 @@ def test_list_roms_paginates_when_total_exceeds_page() -> None:
         respx.get(f"{BASE_URL}/api/roms").mock(side_effect=responses)
         with RommHttpAdapter(make_config()) as http:
             api = RommApi(http)
-            roms = api.list_roms_in_collection(7)
+            roms = api.list_roms(collection_id=7)
     finally:
         api_module.ROMS_PAGE_SIZE = original
     assert [r["id"] for r in roms] == [1, 2, 3, 4, 5]
@@ -241,7 +269,7 @@ def test_list_roms_passes_group_by_meta_id_when_primary_only() -> None:
     )
     with RommHttpAdapter(make_config()) as http:
         api = RommApi(http)
-        api.list_roms_in_collection(7, primary_only=True)
+        api.list_roms(collection_id=7, primary_only=True)
     sent = route.calls.last.request
     assert "group_by_meta_id=true" in str(sent.url)
 
@@ -255,7 +283,7 @@ def test_list_roms_handles_empty_collection() -> None:
     )
     with RommHttpAdapter(make_config()) as http:
         api = RommApi(http)
-        roms = api.list_roms_in_collection(7)
+        roms = api.list_roms(collection_id=7)
     assert roms == []
 
 

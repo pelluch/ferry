@@ -61,9 +61,10 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
     config = loaded.config
     if config.sync is None:
         raise click.ClickException(
-            "[sync].collection is required for sync. Add to your config:\n\n"
+            "[sync] is required for sync. Add at least one source to your config:\n\n"
             "    [sync]\n"
-            '    collection = "Steam Deck"'
+            '    collections = ["Steam Deck"]\n'
+            '    # or platforms = ["gba", "snes"]'
         )
     if config.destination is None:
         raise click.ClickException(
@@ -75,14 +76,28 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
     try:
         with RommHttpAdapter(config.romm, logger) as http:
             api = RommApi(http)
-            collection = _resolve_collection(api, sync_cfg.collection)
-            click.echo(f"✓ resolved collection: {collection['name']} (id={collection['id']})")
-            click.echo("fetching ROM listing…")
-            current_roms = api.list_roms_in_collection(
-                collection["id"],
+            collection_ids, collection_errors = _resolve_collections(api, sync_cfg.collections)
+            platform_ids, platform_errors = _resolve_platforms(api, sync_cfg.platforms)
+            all_errors = collection_errors + platform_errors
+            if all_errors:
+                raise click.ClickException("\n\n".join(all_errors))
+            if sync_cfg.collections:
+                click.echo(
+                    f"✓ resolved {len(collection_ids)} collection(s): "
+                    + ", ".join(sync_cfg.collections)
+                )
+            if sync_cfg.platforms:
+                click.echo(
+                    f"✓ resolved {len(platform_ids)} platform(s): " + ", ".join(sync_cfg.platforms)
+                )
+            click.echo("fetching ROMs…")
+            current_roms = _fetch_roms(
+                api,
+                collection_ids=collection_ids,
+                platform_ids=platform_ids,
                 primary_only=sync_cfg.primary_version_only,
             )
-            click.echo(f"✓ {len(current_roms)} ROM(s) returned")
+            click.echo(f"✓ {len(current_roms)} unique ROM(s) after dedup")
 
             state_path = default_state_path()
             state = load_state(state_path)
@@ -157,22 +172,100 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
         raise click.ClickException(str(e)) from e
 
 
-def _resolve_collection(api: RommApi, name: str) -> dict[str, Any]:
-    collections = api.list_collections()
-    matches = [c for c in collections if c.get("name") == name]
-    if not matches:
-        names = sorted(c.get("name", "?") for c in collections)
-        raise click.ClickException(
-            f"collection {name!r} not found in RomM.\n"
-            f"available: {', '.join(names) if names else '(none)'}"
-        )
-    if len(matches) > 1:
-        raise click.ClickException(
-            f"multiple collections named {name!r} found "
-            f"(ids: {[c.get('id') for c in matches]}). "
+def _resolve_collections(api: RommApi, names: tuple[str, ...]) -> tuple[list[int], list[str]]:
+    """Resolve manual-collection names → ids.
+
+    Returns (ids, errors) — errors is a list of human-readable error blocks
+    (missing names, ambiguous names). Caller combines errors from multiple
+    resolvers so the user sees all problems at once.
+    """
+    if not names:
+        return [], []
+    available = api.list_collections()
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for c in available:
+        by_name.setdefault(c.get("name", ""), []).append(c)
+
+    resolved: list[int] = []
+    missing: list[str] = []
+    ambiguous: list[tuple[str, list[Any]]] = []
+    for name in names:
+        matches = by_name.get(name, [])
+        if not matches:
+            missing.append(name)
+            continue
+        if len(matches) > 1:
+            ambiguous.append((name, [m.get("id") for m in matches]))
+            continue
+        resolved.append(int(matches[0]["id"]))
+
+    errors: list[str] = []
+    for name, ids in ambiguous:
+        errors.append(
+            f"multiple collections named {name!r} found (ids: {ids}). "
             f"matching by id is not yet supported; rename one in RomM."
         )
-    return matches[0]
+    if missing:
+        all_names = sorted(by_name)
+        errors.append(
+            f"collection(s) not found in RomM: {missing}\n"
+            f"available: {', '.join(all_names) if all_names else '(none)'}"
+        )
+    return resolved, errors
+
+
+def _resolve_platforms(api: RommApi, slugs: tuple[str, ...]) -> tuple[list[int], list[str]]:
+    """Resolve RomM platform slugs → ids.
+
+    Returns (ids, errors) so callers can present platform misses alongside
+    other resolution errors.
+    """
+    if not slugs:
+        return [], []
+    available = api.list_platforms()
+    by_slug = {p.get("slug"): p for p in available}
+    resolved: list[int] = []
+    missing: list[str] = []
+    for slug in slugs:
+        match = by_slug.get(slug)
+        if match is None:
+            missing.append(slug)
+            continue
+        resolved.append(int(match["id"]))
+
+    errors: list[str] = []
+    if missing:
+        all_slugs = sorted(s for s in by_slug if s)
+        errors.append(
+            f"platform slug(s) not found in RomM: {missing}\n"
+            f"available: {', '.join(all_slugs) if all_slugs else '(none)'}"
+        )
+    return resolved, errors
+
+
+def _fetch_roms(
+    api: RommApi,
+    *,
+    collection_ids: list[int],
+    platform_ids: list[int],
+    primary_only: bool,
+) -> list[dict[str, Any]]:
+    """Union-by-rom_id across all configured sources. Insertion order preserved."""
+    by_id: dict[int, dict[str, Any]] = {}
+
+    for cid in collection_ids:
+        for rom in api.list_roms(collection_id=cid, primary_only=primary_only):
+            rom_id = rom.get("id")
+            if isinstance(rom_id, int):
+                by_id.setdefault(rom_id, rom)
+
+    if platform_ids:
+        for rom in api.list_roms(platform_ids=platform_ids, primary_only=primary_only):
+            rom_id = rom.get("id")
+            if isinstance(rom_id, int):
+                by_id.setdefault(rom_id, rom)
+
+    return list(by_id.values())
 
 
 def _print_plan_summary(plan: SyncPlan) -> None:

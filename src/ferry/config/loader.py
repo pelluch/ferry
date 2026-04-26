@@ -17,7 +17,13 @@ _TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync", "transforms"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
 _DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
 _SYNC_KEYS = frozenset(
-    {"collection", "primary_version_only", "delete_on_remove", "trash_retention_days"}
+    {
+        "collections",
+        "platforms",
+        "primary_version_only",
+        "delete_on_remove",
+        "trash_retention_days",
+    }
 )
 _TRANSFORMS_PLATFORM_KEYS = frozenset({"pipeline"})
 
@@ -138,9 +144,13 @@ def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:
     if unknown:
         raise ConfigInvalidError(f"unknown keys under [sync] in {path}: {sorted(unknown)}")
 
-    collection = sync.get("collection")
-    if not isinstance(collection, str) or not collection:
-        raise ConfigInvalidError(f"[sync].collection must be a non-empty string in {path}")
+    collections = _parse_string_list(sync, "collections", path)
+    platforms = _parse_string_list(sync, "platforms", path)
+    if not collections and not platforms:
+        raise ConfigInvalidError(
+            f"[sync] in {path} requires at least one of `collections = [...]` or "
+            f"`platforms = [...]` to be non-empty."
+        )
 
     primary = sync.get("primary_version_only", False)
     if not isinstance(primary, bool):
@@ -157,11 +167,26 @@ def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:
         )
 
     return SyncConfig(
-        collection=collection,
+        collections=collections,
+        platforms=platforms,
         primary_version_only=primary,
         delete_on_remove=delete_on_remove,
         trash_retention_days=retention,
     )
+
+
+def _parse_string_list(table: dict, key: str, path: Path) -> tuple[str, ...]:
+    raw = table.get(key, [])
+    if not isinstance(raw, list) or not all(isinstance(v, str) and v for v in raw):
+        raise ConfigInvalidError(f"[sync].{key} must be a list of non-empty strings in {path}")
+    # Preserve config order; dedup defensively (user might list "gba" twice).
+    seen: set[str] = set()
+    unique: list[str] = []
+    for v in raw:
+        if v not in seen:
+            seen.add(v)
+            unique.append(v)
+    return tuple(unique)
 
 
 def _parse_transforms(raw: dict, path: Path) -> TransformsConfig:

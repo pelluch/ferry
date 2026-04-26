@@ -18,7 +18,8 @@ BASE_URL = "https://romm.example.tld"
 def write_config(
     cfg: Path,
     *,
-    collection: str = "Steam Deck",
+    collections: tuple[str, ...] = ("Steam Deck",),
+    platforms: tuple[str, ...] = (),
     include_destination: bool = True,
     roms_base: Path | None = None,
     transforms_section: str | None = None,
@@ -33,7 +34,11 @@ def write_config(
             parts += ["", "[destination]", 'preset = "esde-native"']
         else:
             parts += ["", "[destination]", f'roms_base = "{roms_base}"']
-    parts += ["", "[sync]", f'collection = "{collection}"']
+    parts += ["", "[sync]"]
+    if collections:
+        parts.append(f"collections = {list(collections)!r}")
+    if platforms:
+        parts.append(f"platforms = {list(platforms)!r}")
     if transforms_section:
         parts += ["", transforms_section]
     cfg.write_text("\n".join(parts) + "\n")
@@ -84,7 +89,7 @@ def test_sync_without_sync_section_errors(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
     assert result.exit_code != 0
-    assert "[sync].collection" in result.output
+    assert "[sync]" in result.output
 
 
 def test_sync_without_destination_errors(tmp_path: Path) -> None:
@@ -102,7 +107,7 @@ def test_sync_without_destination_errors(tmp_path: Path) -> None:
 
 @respx.mock
 def test_unknown_collection_lists_available(tmp_path: Path) -> None:
-    cfg = write_config(tmp_path / "config.toml", collection="Atlantis")
+    cfg = write_config(tmp_path / "config.toml", collections=("Atlantis",))
     mock_endpoints(
         collections=[{"id": 1, "name": "Steam Deck"}, {"id": 2, "name": "Quick Picks"}],
         rom_items=[],
@@ -117,7 +122,7 @@ def test_unknown_collection_lists_available(tmp_path: Path) -> None:
 
 @respx.mock
 def test_ambiguous_collection_name_errors(tmp_path: Path) -> None:
-    cfg = write_config(tmp_path / "config.toml", collection="Dupes")
+    cfg = write_config(tmp_path / "config.toml", collections=("Dupes",))
     mock_endpoints(
         collections=[{"id": 1, "name": "Dupes"}, {"id": 2, "name": "Dupes"}],
         rom_items=[],
@@ -126,6 +131,31 @@ def test_ambiguous_collection_name_errors(tmp_path: Path) -> None:
     result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
     assert result.exit_code != 0
     assert "multiple collections" in result.output
+
+
+@respx.mock
+def test_unknown_collection_and_platform_both_reported(tmp_path: Path) -> None:
+    """Both resolution failures surface together so the user sees the whole picture."""
+    cfg = write_config(
+        tmp_path / "config.toml",
+        collections=("Atlantis",),
+        platforms=("nintendo-virtual-boy-classic",),
+    )
+    respx.get(f"{BASE_URL}/api/collections").mock(
+        return_value=httpx.Response(200, json=[{"id": 1, "name": "Steam Deck"}])
+    )
+    respx.get(f"{BASE_URL}/api/platforms").mock(
+        return_value=httpx.Response(200, json=[{"id": 4, "slug": "gba", "name": "GBA"}])
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code != 0
+    # Both problems mentioned in the same error.
+    assert "Atlantis" in result.output
+    assert "nintendo-virtual-boy-classic" in result.output
+    # Both available lists shown.
+    assert "Steam Deck" in result.output  # available collections
+    assert "gba" in result.output  # available platforms
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +169,7 @@ def test_dry_run_shows_adds_with_resolved_paths_and_pipeline(tmp_path: Path, mon
     roms_base = tmp_path / "ROMs"
     cfg = write_config(
         tmp_path / "config.toml",
-        collection="Steam Deck",
+        collections=("Steam Deck",),
         roms_base=roms_base,
         transforms_section='[transforms.gc]\npipeline = ["unzip"]',
     )
@@ -165,8 +195,9 @@ def test_dry_run_shows_adds_with_resolved_paths_and_pipeline(tmp_path: Path, mon
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
     assert result.exit_code == 0, result.output
-    assert "resolved collection: Steam Deck" in result.output
-    assert "2 ROM(s) returned" in result.output
+    assert "resolved 1 collection(s)" in result.output
+    assert "Steam Deck" in result.output
+    assert "2 unique ROM(s)" in result.output
     assert "Add:        2" in result.output
     # New format: name + slug → resolved path + pipeline summary.
     assert f"+ Pikmin (gc, rom_id=101) → {roms_base}/gc/Pikmin.zip [unzip]" in result.output
@@ -414,7 +445,7 @@ def test_sync_executes_deletes_and_moves_to_trash(tmp_path: Path, monkeypatch) -
         "\n[destination]\n"
         f'roms_base = "{roms_base}"\n'
         "\n[sync]\n"
-        'collection = "Steam Deck"\n'
+        'collections = ["Steam Deck"]\n'
         "delete_on_remove = true\n"
     )
 
@@ -475,7 +506,7 @@ def test_sync_with_delete_on_remove_false_keeps_files(tmp_path: Path, monkeypatc
         "\n[destination]\n"
         f'roms_base = "{roms_base}"\n'
         "\n[sync]\n"
-        'collection = "Steam Deck"\n'
+        'collections = ["Steam Deck"]\n'
         "delete_on_remove = false\n"
     )
 

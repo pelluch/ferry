@@ -12,9 +12,19 @@ class RommConfig:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SyncConfig:
-    """Settings for `ferry sync`. Required for sync; ignored by other commands."""
+    """Settings for `ferry sync`. Required for sync; ignored by other commands.
 
-    collection: str
+    The set of ROMs to sync is the *union* of every source — manual
+    collections plus platforms (and, in a follow-up checkpoint, smart and
+    virtual collections). At least one source must be non-empty.
+    """
+
+    # Manual user-created RomM collections, by name.
+    collections: tuple[str, ...] = ()
+    # RomM platform slugs (e.g., "gba", "snes"). Multi-valued is supported by
+    # RomM's /api/roms?platform_ids=A&platform_ids=B endpoint, so a single
+    # request fetches all platforms.
+    platforms: tuple[str, ...] = ()
     primary_version_only: bool = False
     # Defaults to False so a first sync against a stale state can never silently
     # trash files. Users opt into mirror semantics explicitly when they're
@@ -22,6 +32,10 @@ class SyncConfig:
     # govern.
     delete_on_remove: bool = False
     trash_retention_days: int = 14
+
+    @property
+    def has_any_source(self) -> bool:
+        return bool(self.collections or self.platforms)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

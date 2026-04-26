@@ -293,35 +293,70 @@ def test_no_sync_section_yields_none(tmp_path: Path) -> None:
     assert loaded.config.sync is None
 
 
-def test_sync_collection_required(tmp_path: Path) -> None:
+def test_sync_requires_at_least_one_source(tmp_path: Path) -> None:
+    """`[sync]` with neither collections nor platforms is rejected."""
     cfg_file = write(
         tmp_path / "config.toml", minimal_toml() + "\n[sync]\nprimary_version_only = true\n"
     )
-    with pytest.raises(ConfigInvalidError, match=r"\[sync\]\.collection"):
+    with pytest.raises(ConfigInvalidError, match="collections.*platforms|at least one"):
         load_config(cfg_file, env={})
 
 
-def test_sync_collection_must_be_string(tmp_path: Path) -> None:
-    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[sync]\ncollection = 12\n")
-    with pytest.raises(ConfigInvalidError, match="collection"):
+def test_sync_collections_must_be_string_list(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[sync]\ncollections = [12]\n")
+    with pytest.raises(ConfigInvalidError, match="collections"):
         load_config(cfg_file, env={})
 
 
-def test_sync_loads_with_collection(tmp_path: Path) -> None:
+def test_sync_loads_with_collections(tmp_path: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\n',
+        minimal_toml() + '\n[sync]\ncollections = ["Steam Deck", "Quick Picks"]\n',
     )
     loaded = load_config(cfg_file, env={})
     assert loaded.config.sync is not None
-    assert loaded.config.sync.collection == "Steam Deck"
+    assert loaded.config.sync.collections == ("Steam Deck", "Quick Picks")
+    assert loaded.config.sync.platforms == ()
     assert loaded.config.sync.primary_version_only is False
+
+
+def test_sync_loads_with_platforms_only(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[sync]\nplatforms = ["gba", "snes"]\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.sync is not None
+    assert loaded.config.sync.collections == ()
+    assert loaded.config.sync.platforms == ("gba", "snes")
+
+
+def test_sync_loads_with_collections_and_platforms(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + "\n[sync]\n" + 'collections = ["Steam Deck"]\n' + 'platforms = ["gba"]\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.sync is not None
+    assert loaded.config.sync.collections == ("Steam Deck",)
+    assert loaded.config.sync.platforms == ("gba",)
+
+
+def test_sync_dedups_string_lists(tmp_path: Path) -> None:
+    """User listing the same source twice → silently dedup; preserve first-seen order."""
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[sync]\nplatforms = ["gba", "snes", "gba"]\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.sync is not None
+    assert loaded.config.sync.platforms == ("gba", "snes")
 
 
 def test_sync_primary_version_only_parses(tmp_path: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\nprimary_version_only = true\n',
+        minimal_toml() + '\n[sync]\ncollections = ["Steam Deck"]\nprimary_version_only = true\n',
     )
     loaded = load_config(cfg_file, env={})
     assert loaded.config.sync is not None
@@ -332,7 +367,7 @@ def test_sync_delete_on_remove_defaults_false(tmp_path: Path) -> None:
     """Less-surprising default — first sync against stale state can't silently trash."""
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\n',
+        minimal_toml() + '\n[sync]\ncollections = ["Steam Deck"]\n',
     )
     loaded = load_config(cfg_file, env={})
     assert loaded.config.sync is not None
@@ -345,7 +380,7 @@ def test_sync_delete_on_remove_opt_in(tmp_path: Path) -> None:
         tmp_path / "config.toml",
         minimal_toml()
         + "\n[sync]\n"
-        + 'collection = "Steam Deck"\n'
+        + 'collections = ["Steam Deck"]\n'
         + "delete_on_remove = true\n"
         + "trash_retention_days = 30\n",
     )
@@ -358,7 +393,7 @@ def test_sync_delete_on_remove_opt_in(tmp_path: Path) -> None:
 def test_sync_trash_retention_must_be_non_negative(tmp_path: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\ntrash_retention_days = -1\n',
+        minimal_toml() + '\n[sync]\ncollections = ["Steam Deck"]\ntrash_retention_days = -1\n',
     )
     with pytest.raises(ConfigInvalidError, match="non-negative"):
         load_config(cfg_file, env={})
@@ -368,7 +403,7 @@ def test_sync_trash_retention_must_be_int_not_bool(tmp_path: Path) -> None:
     """Booleans are int subclasses in Python — guard against `true` as days."""
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + '\n[sync]\ncollection = "Steam Deck"\ntrash_retention_days = true\n',
+        minimal_toml() + '\n[sync]\ncollections = ["Steam Deck"]\ntrash_retention_days = true\n',
     )
     with pytest.raises(ConfigInvalidError, match="non-negative"):
         load_config(cfg_file, env={})
@@ -377,7 +412,7 @@ def test_sync_trash_retention_must_be_int_not_bool(tmp_path: Path) -> None:
 def test_sync_unknown_key_raises(tmp_path: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + '\n[sync]\ncollection = "X"\nbreed = "labradoodle"\n',
+        minimal_toml() + '\n[sync]\ncollections = ["Steam Deck"]\nbreed = "labradoodle"\n',
     )
     with pytest.raises(ConfigInvalidError, match=r"unknown keys under \[sync\]"):
         load_config(cfg_file, env={})

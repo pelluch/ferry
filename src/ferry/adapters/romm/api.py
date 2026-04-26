@@ -25,27 +25,40 @@ class RommApi:
         return self._http.get_json("/api/users/me")
 
     def list_collections(self) -> list[dict[str, Any]]:
-        """GET /api/collections — collections visible to the current user."""
+        """GET /api/collections — manual user-created collections."""
         return self._http.get_json("/api/collections")
 
-    def list_roms_in_collection(
+    def list_platforms(self) -> list[dict[str, Any]]:
+        """GET /api/platforms — every platform RomM knows about (id, slug, name, ...).
+
+        Used to resolve user-config `[sync].platforms` slugs (`"gba"`) to the
+        integer ids RomM's filter API accepts.
+        """
+        return self._http.get_json("/api/platforms")
+
+    def list_roms(
         self,
-        collection_id: int,
         *,
+        collection_id: int | None = None,
+        platform_ids: list[int] | None = None,
         primary_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """GET /api/roms?collection_id=… — auto-paginated; returns all rows.
+        """GET /api/roms with optional filters; auto-paginated.
 
-        Skips RomM's UI-only metadata (`with_char_index`, `with_filter_values`)
-        to keep the response payload small. When `primary_only` is True, RomM
-        groups by metadata ID and returns the user's `is_main_sibling`-flagged
-        ROM per group (DESIGN.md §5.1).
+        Pass at most one filter shape per call. Combining `collection_id`
+        with `platform_ids` server-side intersects (ROM must match all
+        filters) — rarely what ferry's union-of-sources model wants.
+        Callers fetch each source separately and dedup client-side.
+
+        Skips RomM's UI-only metadata (`with_char_index`,
+        `with_filter_values`) to keep payloads small. When `primary_only` is
+        True, RomM groups by metadata ID and returns the user's
+        `is_main_sibling`-flagged ROM per group (DESIGN.md §5.1).
         """
         items: list[dict[str, Any]] = []
         offset = 0
         while True:
             params: dict[str, Any] = {
-                "collection_id": collection_id,
                 "limit": ROMS_PAGE_SIZE,
                 "offset": offset,
                 "with_char_index": "false",
@@ -53,6 +66,10 @@ class RommApi:
                 "order_by": "id",
                 "order_dir": "asc",
             }
+            if collection_id is not None:
+                params["collection_id"] = collection_id
+            if platform_ids:
+                params["platform_ids"] = list(platform_ids)
             if primary_only:
                 params["group_by_meta_id"] = "true"
             page = self._http.get_json("/api/roms", params=params)
