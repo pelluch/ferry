@@ -4,6 +4,7 @@ from pathlib import Path
 import click
 
 from ferry import __version__
+from ferry.cli.config_cmd import config_group
 from ferry.cli.detect import detect
 from ferry.cli.ping import ping
 from ferry.cli.status import status
@@ -44,6 +45,7 @@ def _configure_logging(verbosity: int) -> None:
         root.addHandler(handler)
 
 
+app.add_command(config_group)
 app.add_command(detect)
 app.add_command(ping)
 app.add_command(status)
