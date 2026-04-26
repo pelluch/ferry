@@ -31,6 +31,7 @@ from ferry.services.sync_executor import (
     default_scratch_root,
     execute_plan,
 )
+from ferry.services.sync_lock import LockHeld, acquire_sync_lock, default_lock_path
 from ferry.services.trash import default_trash_root, purge_expired
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,18 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
         )
 
     sync_cfg: SyncConfig = config.sync
+    try:
+        with acquire_sync_lock(default_lock_path()):
+            _run_sync(config, sync_cfg, dry_run=dry_run, full=full)
+    except LockHeld as e:
+        raise click.ClickException(
+            f"another ferry sync is already running (pid {e.pid}, lock at "
+            f"{e.lock_path}).\nWait for it to finish, or check `ps -p {e.pid}` "
+            "if you suspect it's stuck."
+        ) from e
+
+
+def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool) -> None:
     click.echo(f"connecting to {config.romm.url}…")
     try:
         with RommHttpAdapter(config.romm, logger) as http:

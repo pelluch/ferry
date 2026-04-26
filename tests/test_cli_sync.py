@@ -647,3 +647,22 @@ def test_sync_per_rom_failure_continues_with_rest(tmp_path: Path, monkeypatch) -
     assert "Bad" in result.output  # listed in failures
     # Good ROM landed.
     assert (roms_base / "gc" / "Good.iso").read_bytes() == b"g"
+
+
+def test_sync_refuses_when_lock_is_held(tmp_path: Path) -> None:
+    """If another sync is running (or a stale flock survives somehow),
+    `ferry sync` must abort with a clear, actionable error rather than
+    racing on state.json."""
+    from ferry.services.sync_lock import acquire_sync_lock, default_lock_path
+
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+
+    # Pre-acquire the lock at the path the CLI will use. Conftest's
+    # _isolated_home fixture pinned HOME to a tmp dir, so default_lock_path()
+    # resolves under there — same path the CLI will hit.
+    with acquire_sync_lock(default_lock_path()):
+        result = runner.invoke(app, ["--config", str(cfg), "sync"], env={})
+    assert result.exit_code != 0
+    assert "another ferry sync is already running" in result.output
+    assert "sync.lock" in result.output

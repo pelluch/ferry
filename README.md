@@ -18,6 +18,14 @@ uv tool install /path/to/ferry
 
 This puts the `ferry` binary at `~/.local/bin/ferry`.
 
+To upgrade after pulling new commits, use `--reinstall` — without it,
+`uv tool install` is a no-op for already-installed tools and your
+snapshot stays at the previous version:
+
+```sh
+uv tool install /path/to/ferry --reinstall
+```
+
 ## Quickstart
 
 ```sh
