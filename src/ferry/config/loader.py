@@ -6,14 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ferry.config.schema import Config, RommConfig, SyncConfig, TransformsConfig
+from ferry.config.schema import Config, RommConfig, SavesConfig, SyncConfig, TransformsConfig
 from ferry.domain.destination import PRESETS, Destination, resolve_preset
 from ferry.transforms import known_transforms
 
 ENV_API_KEY = "FERRY_ROMM_API_KEY"
 ENV_CONFIG_PATH = "FERRY_CONFIG"
 
-_TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync", "transforms"})
+_TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync", "transforms", "saves"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
 _DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
 _SYNC_KEYS = frozenset(
@@ -26,6 +26,8 @@ _SYNC_KEYS = frozenset(
     }
 )
 _TRANSFORMS_PLATFORM_KEYS = frozenset({"pipeline"})
+_SAVES_KEYS = frozenset({"enabled", "retroarch_install"})
+_RETROARCH_INSTALL_VALUES = frozenset({"retrodeck-flatpak", "libretro-flatpak", "native"})
 
 
 class ApiKeySource(enum.StrEnum):
@@ -119,6 +121,7 @@ def load_config(
     destination = _parse_destination(raw, path)
     sync = _parse_sync(raw, path)
     transforms = _parse_transforms(raw, path)
+    saves = _parse_saves(raw, path)
 
     config = Config(
         romm=RommConfig(
@@ -129,8 +132,37 @@ def load_config(
         destination=destination,
         sync=sync,
         transforms=transforms,
+        saves=saves,
     )
     return LoadedConfig(config=config, config_path=path, api_key_source=api_key_source)
+
+
+def _parse_saves(raw: dict, path: Path) -> SavesConfig | None:
+    if "saves" not in raw:
+        return None
+    section = raw["saves"]
+    if not isinstance(section, dict):
+        raise ConfigInvalidError(f"[saves] must be a table in {path}")
+
+    unknown = set(section.keys()) - _SAVES_KEYS
+    if unknown:
+        raise ConfigInvalidError(f"unknown keys under [saves] in {path}: {sorted(unknown)}")
+
+    enabled = section.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigInvalidError(f"[saves].enabled must be a boolean in {path}")
+
+    retroarch_install = section.get("retroarch_install")
+    if retroarch_install is not None:
+        if not isinstance(retroarch_install, str):
+            raise ConfigInvalidError(f"[saves].retroarch_install must be a string in {path}")
+        if retroarch_install not in _RETROARCH_INSTALL_VALUES:
+            allowed = ", ".join(sorted(_RETROARCH_INSTALL_VALUES))
+            raise ConfigInvalidError(
+                f"[saves].retroarch_install in {path} must be one of: {allowed}"
+            )
+
+    return SavesConfig(enabled=enabled, retroarch_install=retroarch_install)
 
 
 def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:

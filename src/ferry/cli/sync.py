@@ -3,10 +3,16 @@ from typing import Any
 
 import click
 
+from ferry.adapters.retroarch_paths import (
+    RetroArchInstall,
+    discover_retroarch_installs,
+    select_active_install,
+)
 from ferry.adapters.romm import (
     RommApi,
     RommApiError,
     RommAuthError,
+    RommForbiddenError,
     RommHttpAdapter,
 )
 from ferry.adapters.state_store import (
@@ -16,15 +22,21 @@ from ferry.adapters.state_store import (
     recover_state_from_sidecars,
     save_state,
 )
-from ferry.config import ConfigError, SyncConfig, load_config
+from ferry.config import ConfigError, SavesConfig, SyncConfig, load_config
 from ferry.config.schema import Config
 from ferry.domain.platforms import resolve_platform_dir
+from ferry.domain.state import LibraryState
 from ferry.domain.sync_plan import (
     AddAction,
     DeleteAction,
     SyncPlan,
     UpdateAction,
     compute_plan,
+)
+from ferry.services.save_backend import (
+    RetroArchSaveBackend,
+    SaveSyncResult,
+    get_or_register_device,
 )
 from ferry.services.sync_executor import (
     ExecutionResult,
@@ -149,6 +161,7 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
             will_act = bool(
                 plan.to_add or plan.to_update or (plan.to_delete and sync_cfg.delete_on_remove)
             )
+            save_backend, state = _prepare_save_backend(config, api, state, state_path)
             if not will_act:
                 click.echo("")
                 if plan.is_empty:
@@ -159,6 +172,8 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
                         "longer in collection ([sync].delete_on_remove = false)."
                     )
                     click.echo("Set delete_on_remove = true in your config to trash them.")
+                if save_backend is not None:
+                    _run_save_sync(save_backend, state, state_path)
                 return
 
             click.echo("")
@@ -175,14 +190,139 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
                 trash_root=trash_root,
                 delete_on_remove=sync_cfg.delete_on_remove,
                 progress=click.echo,
+                on_rom_delete=(
+                    (lambda rom, td: save_backend.delete_for_rom(rom, td))
+                    if save_backend is not None
+                    else None
+                ),
             )
             _print_execution_summary(plan, result)
+            if save_backend is not None:
+                _run_save_sync(save_backend, state, state_path)
     except RommAuthError as e:
         raise click.ClickException(
             f"{e}\n\ncheck the API key — it may be expired or revoked."
         ) from e
     except RommApiError as e:
         raise click.ClickException(str(e)) from e
+
+
+def _prepare_save_backend(
+    config: Config,
+    api: RommApi,
+    state: LibraryState,
+    state_path,
+) -> tuple[RetroArchSaveBackend | None, LibraryState]:
+    """Build a RetroArchSaveBackend if save sync is configured + viable.
+
+    Returns `(backend, state)` — `state` may be a new LibraryState if we
+    just registered this client and cached the device_id. On any blocker
+    (no `[saves]` config, disabled, no RA install, ambiguous install,
+    403 on registration) returns `(None, state)` and surfaces a friendly
+    one-liner to the user.
+    """
+    if config.saves is None or not config.saves.enabled:
+        return None, state
+
+    install = _select_retroarch_install(config.saves)
+    if install is None:
+        return None, state
+
+    try:
+        device_id, state = get_or_register_device(api, state)
+    except RommForbiddenError:
+        click.echo("")
+        click.echo(
+            "save sync skipped: your RomM API token lacks write scopes.\n"
+            "  ferry needs `devices.write` and `assets.write` to sync saves.\n"
+            "  create a new token in RomM's web UI with those scopes, then\n"
+            "  set FERRY_ROMM_API_KEY (or [romm].api_key) to the new value."
+        )
+        return None, state
+    except RommApiError as e:
+        click.echo("")
+        click.echo(f"save sync skipped: device registration failed ({e}).")
+        return None, state
+
+    if state.device_id is not None:
+        save_state(state, state_path)
+    return (
+        RetroArchSaveBackend(install=install, api=api, device_id=device_id, log=logger),
+        state,
+    )
+
+
+def _select_retroarch_install(saves_cfg: SavesConfig) -> RetroArchInstall | None:
+    """Apply the user's `retroarch_install` override or fall back to auto-select."""
+    installs = discover_retroarch_installs()
+    if not installs:
+        click.echo("")
+        click.echo("save sync skipped: no RetroArch install detected.")
+        return None
+
+    if saves_cfg.retroarch_install is not None:
+        for install in installs:
+            if install.source == saves_cfg.retroarch_install:
+                return install
+        click.echo("")
+        click.echo(
+            f"save sync skipped: [saves].retroarch_install = "
+            f"{saves_cfg.retroarch_install!r} but no install matched."
+        )
+        return None
+
+    active = select_active_install(installs)
+    if active is None:
+        click.echo("")
+        click.echo(
+            "save sync skipped: multiple RetroArch installs with active saves "
+            "(set [saves].retroarch_install to disambiguate)."
+        )
+    return active
+
+
+def _run_save_sync(
+    backend: RetroArchSaveBackend,
+    state: LibraryState,
+    state_path,
+) -> None:
+    """Run save sync and print a summary block in the existing layout."""
+    click.echo("")
+    click.echo("Syncing saves…")
+    result = backend.sync(state)
+    if result.updated_roms:
+        for rom_id, rom in result.updated_roms.items():
+            state.roms[rom_id] = rom
+        save_state(state, state_path)
+    _print_save_sync_summary(result)
+
+
+def _print_save_sync_summary(result: SaveSyncResult) -> None:
+    click.echo("")
+    click.echo("Save sync:")
+    click.echo(f"  Uploaded:   {result.uploaded}")
+    click.echo(f"  Downloaded: {result.downloaded}")
+    click.echo(f"  Skipped:    {result.skipped}")
+    if result.conflicts_resolved:
+        click.echo(f"  Conflicts resolved: {result.conflicts_resolved}")
+    if result.ambiguous:
+        click.echo("")
+        click.echo("Ambiguous (within tolerance — skipped, will re-evaluate next sync):")
+        for line in result.ambiguous[:_DEFAULT_PREVIEW]:
+            click.echo(f"  · {line}")
+    if result.failed:
+        click.echo("")
+        click.echo("Failed:")
+        for line in result.failed[:_DEFAULT_PREVIEW]:
+            click.echo(f"  ✗ {line}")
+    if result.warnings:
+        # Walker warnings (unmatched filenames) are routine; don't shout.
+        unmatched = sum("could not match" in w for w in result.warnings)
+        if unmatched:
+            click.echo(
+                f"  ({unmatched} local save file(s) didn't match any synced ROM — "
+                f"may belong to ROMs not synced via ferry)"
+            )
 
 
 def _resolve_collections(api: RommApi, names: tuple[str, ...]) -> tuple[list[int], list[str]]:

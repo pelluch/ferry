@@ -109,13 +109,20 @@ class RommApi:
 
     def list_saves(
         self,
-        rom_id: int,
+        rom_id: int | None = None,
         *,
         device_id: str | None = None,
         slot: str | None = None,
     ) -> list[dict[str, Any]]:
-        """GET /api/saves?rom_id=X — saves for a ROM, optionally per-device/slot."""
-        params: dict[str, Any] = {"rom_id": rom_id}
+        """GET /api/saves — every save for the user, optionally filtered.
+
+        With no `rom_id`, returns ALL the user's saves in a single call —
+        the bulk shape ferry's save sync flow uses to avoid an N+1 fan-out.
+        Pass `rom_id` to filter server-side when inspecting a single ROM.
+        """
+        params: dict[str, Any] = {}
+        if rom_id is not None:
+            params["rom_id"] = rom_id
         if device_id is not None:
             params["device_id"] = device_id
         if slot is not None:

@@ -94,6 +94,7 @@ def execute_plan(
     trash_root: Path,
     delete_on_remove: bool = False,
     progress: ProgressFn = lambda _msg: None,
+    on_rom_delete: Callable[[RomState, Path], None] | None = None,
 ) -> ExecutionResult:
     """Execute *plan* against the live RomM and the local filesystem.
 
@@ -104,6 +105,11 @@ def execute_plan(
     `delete_on_remove` controls whether `plan.to_delete` actually executes.
     When False (the default, mirroring the config default), the planner's
     delete entries are surfaced informationally but no files move.
+
+    `on_rom_delete` is invoked once per successfully-trashed ROM with
+    (rom_state, trash_dir) — the SaveBackend uses this to trash any saves
+    associated with the removed ROM into the same trash dir. Failures in
+    the callback are logged but don't fail the delete.
     """
     if config.destination is None:
         raise ValueError("execute_plan requires config.destination to be set")
@@ -138,6 +144,13 @@ def execute_plan(
                 )
             )
             continue
+        if on_rom_delete is not None:
+            try:
+                on_rom_delete(delete.previous, trash_dir)
+            except Exception as e:
+                # Save trashing isn't critical to the rom delete; log and continue.
+                logger.exception("on_rom_delete callback failed for rom %d", delete.rom_id)
+                progress(f"{prefix}   (save trash callback warning: {type(e).__name__}: {e})")
         state.roms.pop(delete.rom_id, None)
         save_state(state, state_path)
         result.deleted.append(

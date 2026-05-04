@@ -18,7 +18,11 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 1
+# Schema versions:
+#   1 — initial v1 (rom-only state).
+#   2 — adds RomState.saves and LibraryState.device_id (v2 save sync).
+#       Loads v1 state transparently; missing fields default to empty/None.
+CURRENT_SCHEMA_VERSION = 2
 
 
 class StateSchemaError(Exception):
@@ -41,6 +45,30 @@ class TransformedOutput:
     path: str
     md5: str
     size: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SaveRecord:
+    """Per-save state — what ferry knows about one (rom_id, emulator, slot) save.
+
+    Stored under `RomState.saves` (tuple). The SaveBackend looks up the
+    matching record by (emulator, slot) to decide what changed since the
+    last successful sync, and updates the record on each successful sync.
+
+    `last_sync_*` fields are the snapshot taken at the moment of the last
+    sync — they're the baseline that `domain.save_conflicts` primitives
+    diff against. `server_save_id` is RomM's primary key for the save
+    record, used for download/PUT/delete operations against the API.
+    """
+
+    emulator: str  # "retroarch" or "retroarch-<core>"
+    slot: str
+    save_filename: str
+    last_sync_md5: str
+    last_sync_server_size: int
+    last_sync_server_updated_at: str
+    last_synced_at: str
+    server_save_id: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -67,6 +95,11 @@ class RomState:
     # When ferry last reconciled this entry against RomM.
     synced_at: str  # ISO 8601
 
+    # Per-save state for incremental save sync (v2). Empty for ROMs that
+    # don't have synced saves yet. Keyed by (emulator, slot) — the
+    # SaveBackend queries by that pair when diffing local vs server.
+    saves: tuple[SaveRecord, ...] = ()
+
     @property
     def primary_output(self) -> TransformedOutput:
         return self.outputs[self.primary_output_index]
@@ -79,6 +112,9 @@ class LibraryState:
     schema_version: int = CURRENT_SCHEMA_VERSION
     last_updated_after: str | None = None
     roms: dict[int, RomState] = field(default_factory=dict)
+    # RomM's UUID for this client. Cached after first registration so the
+    # save sync flow doesn't churn on the user's RomM device list every run.
+    device_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +127,7 @@ def to_json(state: LibraryState) -> str:
     payload = {
         "schema_version": state.schema_version,
         "last_updated_after": state.last_updated_after,
+        "device_id": state.device_id,
         "roms": {str(rid): asdict(r) for rid, r in sorted(state.roms.items())},
     }
     return json.dumps(payload, indent=2, sort_keys=True)
@@ -145,6 +182,10 @@ def _state_from_dict(raw: dict[str, Any]) -> LibraryState:
     if last is not None and not isinstance(last, str):
         raise StateDecodeError("last_updated_after must be a string or null")
 
+    device_id = raw.get("device_id")
+    if device_id is not None and not isinstance(device_id, str):
+        raise StateDecodeError("device_id must be a string or null")
+
     roms_raw = raw.get("roms", {})
     if not isinstance(roms_raw, dict):
         raise StateDecodeError("roms must be an object keyed by rom_id")
@@ -166,6 +207,7 @@ def _state_from_dict(raw: dict[str, Any]) -> LibraryState:
         schema_version=schema_version,
         last_updated_after=last,
         roms=roms,
+        device_id=device_id,
     )
 
 
@@ -200,6 +242,11 @@ def _rom_from_dict(raw: dict[str, Any]) -> RomState:
             f"rom.primary_output_index {primary} out of range for {len(outputs)} outputs"
         )
 
+    saves_raw = raw.get("saves", [])
+    if not isinstance(saves_raw, list):
+        raise StateDecodeError("rom.saves must be a list (or omitted)")
+    saves = tuple(_save_record_from_dict(s) for s in saves_raw)
+
     return RomState(
         rom_id=raw["rom_id"],
         platform_slug=raw["platform_slug"],
@@ -212,6 +259,36 @@ def _rom_from_dict(raw: dict[str, Any]) -> RomState:
         outputs=outputs,
         primary_output_index=primary,
         synced_at=raw["synced_at"],
+        saves=saves,
+    )
+
+
+def _save_record_from_dict(raw: Any) -> SaveRecord:
+    if not isinstance(raw, dict):
+        raise StateDecodeError("save entry must be an object")
+    required_str = (
+        "emulator",
+        "slot",
+        "save_filename",
+        "last_sync_md5",
+        "last_sync_server_updated_at",
+        "last_synced_at",
+    )
+    for field_name in required_str:
+        if not isinstance(raw.get(field_name), str):
+            raise StateDecodeError(f"save.{field_name} must be a string")
+    for field_name in ("last_sync_server_size", "server_save_id"):
+        if not isinstance(raw.get(field_name), int):
+            raise StateDecodeError(f"save.{field_name} must be an integer")
+    return SaveRecord(
+        emulator=raw["emulator"],
+        slot=raw["slot"],
+        save_filename=raw["save_filename"],
+        last_sync_md5=raw["last_sync_md5"],
+        last_sync_server_size=raw["last_sync_server_size"],
+        last_sync_server_updated_at=raw["last_sync_server_updated_at"],
+        last_synced_at=raw["last_synced_at"],
+        server_save_id=raw["server_save_id"],
     )
 
 

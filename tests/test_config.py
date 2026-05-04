@@ -535,3 +535,80 @@ def test_destination_section_must_be_a_table(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigInvalidError, match="\\[destination\\] must be a table"):
         load_config(cfg_file, env={})
+
+
+# ---------------------------------------------------------------------------
+# [saves] section (v2)
+# ---------------------------------------------------------------------------
+
+
+def test_no_saves_section_yields_none(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml())
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.saves is None
+
+
+def test_empty_saves_section_defaults_to_enabled(tmp_path: Path) -> None:
+    """Bare `[saves]` opts in — `enabled` defaults to true."""
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[saves]\n")
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.saves is not None
+    assert loaded.config.saves.enabled is True
+    assert loaded.config.saves.retroarch_install is None
+
+
+def test_saves_enabled_explicit_false(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + "\n[saves]\nenabled = false\n",
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.saves is not None
+    assert loaded.config.saves.enabled is False
+
+
+def test_saves_retroarch_install_accepts_known_values(tmp_path: Path) -> None:
+    for value in ("retrodeck-flatpak", "libretro-flatpak", "native"):
+        cfg_file = write(
+            tmp_path / "config.toml",
+            minimal_toml() + f'\n[saves]\nretroarch_install = "{value}"\n',
+        )
+        loaded = load_config(cfg_file, env={})
+        assert loaded.config.saves is not None
+        assert loaded.config.saves.retroarch_install == value
+
+
+def test_saves_retroarch_install_rejects_unknown_value(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[saves]\nretroarch_install = "esx"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="retroarch_install"):
+        load_config(cfg_file, env={})
+
+
+def test_saves_enabled_must_be_bool(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[saves]\nenabled = "yes"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="enabled"):
+        load_config(cfg_file, env={})
+
+
+def test_saves_section_must_be_table(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        f'saves = "on"\n{minimal_toml()}',
+    )
+    with pytest.raises(ConfigInvalidError, match=r"\[saves\] must be a table"):
+        load_config(cfg_file, env={})
+
+
+def test_saves_unknown_key_raises(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[saves]\nbogus = "x"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match=r"unknown keys under \[saves\]"):
+        load_config(cfg_file, env={})

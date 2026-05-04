@@ -7,7 +7,7 @@ from ferry.config.loader import (
     default_config_path,
     load_config,
 )
-from ferry.config.schema import Config, RommConfig, SyncConfig, TransformsConfig
+from ferry.config.schema import Config, RommConfig, SavesConfig, SyncConfig, TransformsConfig
 from ferry.domain.destination import Destination
 
 __all__ = [
@@ -19,6 +19,7 @@ __all__ = [
     "Destination",
     "LoadedConfig",
     "RommConfig",
+    "SavesConfig",
     "SyncConfig",
     "TransformsConfig",
     "default_config_path",

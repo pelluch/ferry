@@ -56,8 +56,27 @@ def _empty_transforms() -> TransformsConfig:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SavesConfig:
+    """Settings for save sync (DESIGN.md §5.3, v2).
+
+    Presence of `[saves]` in config opts the user into save sync; the
+    default `enabled = true` lets the section act as the on switch
+    without requiring a redundant assignment. Set `enabled = false` to
+    keep the section configured but pause the feature.
+
+    `retroarch_install` disambiguates when ferry detects multiple
+    RetroArch installations with active saves. Single-install case
+    leaves it None and discovery picks automatically.
+    """
+
+    enabled: bool = True
+    retroarch_install: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Config:
     romm: RommConfig
     destination: Destination | None = None
     sync: SyncConfig | None = None
     transforms: TransformsConfig = field(default_factory=_empty_transforms)
+    saves: SavesConfig | None = None
