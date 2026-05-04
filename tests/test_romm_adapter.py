@@ -436,3 +436,362 @@ def test_download_rom_handles_apostrophe(tmp_path) -> None:
         api = RommApi(http)
         api.download_rom(77, filename, tmp_path / "out.zip")
     assert route.called
+
+
+# ---------------------------------------------------------------------------
+# RommHttpAdapter — post_json + upload_multipart
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_post_json_sends_body_and_returns_response() -> None:
+    route = respx.post(f"{BASE_URL}/api/x").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        result = http.post_json("/api/x", {"k": "v"})
+    assert result == {"ok": True}
+    sent = route.calls.last.request
+    assert sent.headers["content-type"] == "application/json"
+    assert b'"k":"v"' in sent.content or b'"k": "v"' in sent.content
+
+
+@respx.mock
+def test_post_json_status_translation_includes_detail() -> None:
+    """4xx with `{"detail": "..."}` body surfaces the detail in the error message."""
+    respx.post(f"{BASE_URL}/api/x").mock(
+        return_value=httpx.Response(409, json={"detail": "Slot has a newer save"})
+    )
+    from ferry.adapters.romm import RommConflictError
+
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommConflictError) as ei:
+        http.post_json("/api/x", {})
+    assert "Slot has a newer save" in str(ei.value)
+
+
+@respx.mock
+def test_upload_multipart_sends_file(tmp_path) -> None:
+    file_path = tmp_path / "save.srm"
+    file_path.write_bytes(b"battery save data")
+    route = respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(200, json={"id": 7, "file_name": "save.srm"})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        result = http.upload_multipart(
+            "/api/saves", file_path, params={"rom_id": 42, "emulator": "RetroArch"}
+        )
+    assert result == {"id": 7, "file_name": "save.srm"}
+    sent = route.calls.last.request
+    assert "multipart/form-data" in sent.headers["content-type"]
+    assert b"save.srm" in sent.content
+    assert b"battery save data" in sent.content
+    sent_url = str(sent.url)
+    assert "rom_id=42" in sent_url
+    assert "emulator=RetroArch" in sent_url
+
+
+@respx.mock
+def test_upload_multipart_put_for_in_place_update(tmp_path) -> None:
+    file_path = tmp_path / "save.srm"
+    file_path.write_bytes(b"newer data")
+    route = respx.put(f"{BASE_URL}/api/saves/9").mock(
+        return_value=httpx.Response(200, json={"id": 9})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        http.upload_multipart("/api/saves/9", file_path, method="PUT")
+    assert route.called
+
+
+# ---------------------------------------------------------------------------
+# RommApi.list_saves
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_list_saves_includes_rom_id_in_query() -> None:
+    route = respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(200, json=[{"id": 1, "file_name": "save.srm"}])
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        saves = api.list_saves(42)
+    assert saves == [{"id": 1, "file_name": "save.srm"}]
+    assert "rom_id=42" in str(route.calls.last.request.url)
+
+
+@respx.mock
+def test_list_saves_with_device_and_slot() -> None:
+    route = respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.list_saves(42, device_id="dev-123", slot="auto")
+    sent = str(route.calls.last.request.url)
+    assert "rom_id=42" in sent
+    assert "device_id=dev-123" in sent
+    assert "slot=auto" in sent
+
+
+@respx.mock
+def test_list_saves_returns_empty_list_on_unexpected_shape() -> None:
+    """Defensive: if RomM returns a dict instead of list (shouldn't happen),
+    don't blow up — surface as empty list and let callers handle it."""
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(200, json={"unexpected": "shape"})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        assert api.list_saves(42) == []
+
+
+# ---------------------------------------------------------------------------
+# RommApi.upload_save
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_upload_save_post_path_for_new_save(tmp_path) -> None:
+    file_path = tmp_path / "save.srm"
+    file_path.write_bytes(b"data")
+    route = respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(200, json={"id": 5})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        result = api.upload_save(42, file_path, emulator="RetroArch")
+    assert result == {"id": 5}
+    sent_url = str(route.calls.last.request.url)
+    assert "rom_id=42" in sent_url
+    assert "emulator=RetroArch" in sent_url
+    assert "overwrite=" not in sent_url  # default omits the param
+
+
+@respx.mock
+def test_upload_save_put_path_when_save_id_provided(tmp_path) -> None:
+    file_path = tmp_path / "save.srm"
+    file_path.write_bytes(b"data")
+    route = respx.put(f"{BASE_URL}/api/saves/9").mock(
+        return_value=httpx.Response(200, json={"id": 9})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.upload_save(42, file_path, emulator="RetroArch", save_id=9)
+    assert route.called
+
+
+@respx.mock
+def test_upload_save_passes_overwrite_when_true(tmp_path) -> None:
+    file_path = tmp_path / "save.srm"
+    file_path.write_bytes(b"data")
+    route = respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(200, json={"id": 5})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.upload_save(42, file_path, emulator="RetroArch", overwrite=True)
+    assert "overwrite=true" in str(route.calls.last.request.url)
+
+
+@respx.mock
+def test_upload_save_propagates_409_as_conflict(tmp_path) -> None:
+    """Stale upload — RomM returns 409 with detail; surfaces as RommConflictError."""
+    from ferry.adapters.romm import RommConflictError
+
+    file_path = tmp_path / "save.srm"
+    file_path.write_bytes(b"data")
+    respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(409, json={"detail": "Slot has a newer save"})
+    )
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommConflictError) as ei:
+        api = RommApi(http)
+        api.upload_save(42, file_path, emulator="RetroArch", device_id="dev-1", slot="auto")
+    assert "Slot has a newer save" in str(ei.value)
+
+
+@respx.mock
+def test_upload_save_includes_device_and_slot(tmp_path) -> None:
+    file_path = tmp_path / "save.srm"
+    file_path.write_bytes(b"data")
+    route = respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(200, json={"id": 5})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.upload_save(
+            42,
+            file_path,
+            emulator="RetroArch",
+            device_id="dev-7",
+            slot="quicksave",
+        )
+    sent = str(route.calls.last.request.url)
+    assert "device_id=dev-7" in sent
+    assert "slot=quicksave" in sent
+
+
+# ---------------------------------------------------------------------------
+# RommApi.download_save
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_download_save_streams_to_disk(tmp_path) -> None:
+    payload = b"battery save bytes"
+    route = respx.get(f"{BASE_URL}/api/saves/9/content").mock(
+        return_value=httpx.Response(200, content=payload)
+    )
+    dest = tmp_path / "save.srm"
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        result = api.download_save(9, dest)
+    assert dest.read_bytes() == payload
+    assert result.size == len(payload)
+    assert route.called
+
+
+@respx.mock
+def test_download_save_with_device_id_optimistic_true(tmp_path) -> None:
+    """`optimistic` defaults to True — server records sync at download time;
+    no `optimistic` query param emitted."""
+    payload = b"data"
+    route = respx.get(url__regex=rf"{BASE_URL}/api/saves/9/content.*").mock(
+        return_value=httpx.Response(200, content=payload)
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.download_save(9, tmp_path / "out.srm", device_id="dev-1")
+    sent = str(route.calls.last.request.url)
+    assert "device_id=dev-1" in sent
+    assert "optimistic=" not in sent
+
+
+@respx.mock
+def test_download_save_with_device_id_optimistic_false(tmp_path) -> None:
+    payload = b"data"
+    route = respx.get(url__regex=rf"{BASE_URL}/api/saves/9/content.*").mock(
+        return_value=httpx.Response(200, content=payload)
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.download_save(9, tmp_path / "out.srm", device_id="dev-1", optimistic=False)
+    sent = str(route.calls.last.request.url)
+    assert "device_id=dev-1" in sent
+    assert "optimistic=false" in sent
+
+
+# ---------------------------------------------------------------------------
+# RommApi.confirm_download / delete_saves
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_confirm_download_posts_device_id() -> None:
+    route = respx.post(f"{BASE_URL}/api/saves/9/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 9})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.confirm_download(9, device_id="dev-1")
+    assert route.called
+    body = route.calls.last.request.content
+    assert b"dev-1" in body
+
+
+@respx.mock
+def test_delete_saves_posts_id_list() -> None:
+    route = respx.post(f"{BASE_URL}/api/saves/delete").mock(
+        return_value=httpx.Response(200, json=[1, 2, 3])
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        deleted = api.delete_saves([1, 2, 3])
+    assert deleted == [1, 2, 3]
+    body = route.calls.last.request.content
+    assert b'"saves"' in body
+
+
+@respx.mock
+def test_delete_saves_returns_empty_list_on_unexpected_shape() -> None:
+    respx.post(f"{BASE_URL}/api/saves/delete").mock(
+        return_value=httpx.Response(200, json={"unexpected": "shape"})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        assert api.delete_saves([1]) == []
+
+
+# ---------------------------------------------------------------------------
+# RommApi.register_device
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_register_device_posts_payload() -> None:
+    route = respx.post(f"{BASE_URL}/api/devices").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "device_id": "uuid-abc",
+                "name": "deck",
+                "created_at": "2026-04-25T12:00:00Z",
+            },
+        )
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        result = api.register_device(
+            name="deck",
+            platform="linux",
+            client="ferry",
+            client_version="0.0.1",
+        )
+    assert result["device_id"] == "uuid-abc"
+    body = route.calls.last.request.content
+    assert b'"name":"deck"' in body or b'"name": "deck"' in body
+    assert b'"client":"ferry"' in body or b'"client": "ferry"' in body
+    assert b'"allow_existing":true' in body or b'"allow_existing": true' in body
+
+
+@respx.mock
+def test_register_device_idempotent_returns_existing() -> None:
+    """Re-registering the same fingerprint returns 200 with the existing record."""
+    respx.post(f"{BASE_URL}/api/devices").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "device_id": "uuid-abc",
+                "name": "deck",
+                "created_at": "2026-04-25T12:00:00Z",
+            },
+        )
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        result = api.register_device(
+            name="deck",
+            platform="linux",
+            client="ferry",
+            client_version="0.0.1",
+            hostname="deck",
+            mac_address="00:11:22:33:44:55",
+        )
+    assert result["device_id"] == "uuid-abc"
+
+
+@respx.mock
+def test_register_device_includes_optional_fingerprint_fields() -> None:
+    route = respx.post(f"{BASE_URL}/api/devices").mock(
+        return_value=httpx.Response(201, json={"device_id": "uuid-x"})
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.register_device(
+            name="deck",
+            platform="linux",
+            client="ferry",
+            client_version="0.0.1",
+            hostname="my-deck",
+            mac_address="aa:bb:cc:dd:ee:ff",
+        )
+    body = route.calls.last.request.content
+    assert b"my-deck" in body
+    assert b"aa:bb:cc:dd:ee:ff" in body

@@ -119,6 +119,38 @@ class RommHttpAdapter:
         """
         return self._with_retry(self._do_get_json, path, params)
 
+    def post_json(
+        self,
+        path: str,
+        body: Any,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """POST a JSON body and return the parsed JSON response.
+
+        Used by save/state delete endpoints, device registration, and any
+        body-bearing POST that doesn't carry a file payload.
+        """
+        return self._with_retry(self._do_post_json, path, body, params)
+
+    def upload_multipart(
+        self,
+        path: str,
+        file_path: Path,
+        *,
+        method: str = "POST",
+        params: dict[str, Any] | None = None,
+        field_name: str = "saveFile",
+    ) -> Any:
+        """Upload `file_path` as a multipart form to *path*.
+
+        `field_name` defaults to `"saveFile"` to match RomM's `/api/saves`
+        endpoint; callers uploading screenshots / state files override it.
+        Returns the parsed JSON response body.
+        """
+        return self._with_retry(
+            self._do_upload_multipart, path, file_path, method, params, field_name
+        )
+
     def download(self, path: str, dest_path: Path) -> DownloadResult:
         """Stream a file to *dest_path*, computing md5 as we go.
 
@@ -147,6 +179,46 @@ class RommHttpAdapter:
         if response.is_success:
             return response.json()
         raise self._translate_status(response, url, "GET")
+
+    def _do_post_json(
+        self,
+        path: str,
+        body: Any,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        url = self._absolute_url(path)
+        try:
+            response = self._client.post(path, json=body, params=params)
+        except httpx.HTTPError as exc:
+            raise self._translate_transport_error(exc, url, "POST") from exc
+
+        if response.is_success:
+            return response.json() if response.content else None
+        raise self._translate_status(response, url, "POST")
+
+    def _do_upload_multipart(
+        self,
+        path: str,
+        file_path: Path,
+        method: str,
+        params: dict[str, Any] | None,
+        field_name: str,
+    ) -> Any:
+        url = self._absolute_url(path)
+        try:
+            with file_path.open("rb") as f:
+                response = self._client.request(
+                    method,
+                    path,
+                    params=params,
+                    files={field_name: (file_path.name, f)},
+                )
+        except httpx.HTTPError as exc:
+            raise self._translate_transport_error(exc, url, method) from exc
+
+        if response.is_success:
+            return response.json() if response.content else None
+        raise self._translate_status(response, url, method)
 
     def _do_download(self, path: str, dest_path: Path) -> DownloadResult:
         url = self._absolute_url(path)
@@ -209,7 +281,21 @@ class RommHttpAdapter:
 
     def _translate_status(self, response: httpx.Response, url: str, method: str) -> RommApiError:
         code = response.status_code
-        msg = f"HTTP {code}: {response.reason_phrase} ({method} {url})"
+        # RomM 4xx bodies are typically JSON `{"detail": "..."}`; surface the
+        # detail when present so the user sees the server's reason (e.g.
+        # "Slot has a newer save since your last sync") instead of just the code.
+        detail = ""
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                detail_val = body.get("detail")
+                if isinstance(detail_val, str):
+                    detail = f": {detail_val}"
+                elif isinstance(detail_val, dict):
+                    detail = f": {detail_val.get('message') or detail_val}"
+        except (ValueError, httpx.HTTPError):
+            pass
+        msg = f"HTTP {code}: {response.reason_phrase}{detail} ({method} {url})"
         cls = self._HTTP_STATUS_MAP.get(code)
         if cls is RommServerError:
             return RommServerError(

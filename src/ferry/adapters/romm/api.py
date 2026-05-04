@@ -102,3 +102,130 @@ class RommApi:
         encoded = urllib.parse.quote(url_filename, safe="")
         path = f"/api/roms/{rom_id}/content/{encoded}"
         return self._http.download(path, dest_path)
+
+    # ------------------------------------------------------------------
+    # Saves (DESIGN.md §5.3)
+    # ------------------------------------------------------------------
+
+    def list_saves(
+        self,
+        rom_id: int,
+        *,
+        device_id: str | None = None,
+        slot: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """GET /api/saves?rom_id=X — saves for a ROM, optionally per-device/slot."""
+        params: dict[str, Any] = {"rom_id": rom_id}
+        if device_id is not None:
+            params["device_id"] = device_id
+        if slot is not None:
+            params["slot"] = slot
+        result = self._http.get_json("/api/saves", params=params)
+        return result if isinstance(result, list) else []
+
+    def upload_save(
+        self,
+        rom_id: int,
+        file_path: Path,
+        emulator: str,
+        *,
+        save_id: int | None = None,
+        device_id: str | None = None,
+        slot: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """POST /api/saves (new) or PUT /api/saves/{id} (update existing).
+
+        `device_id` participates in RomM's conflict detection: if the slot
+        has been updated since this device's last sync, the server returns
+        409. Caller resolves via `domain.save_conflicts.resolve_newest` and
+        retries with `overwrite=True`.
+        """
+        params: dict[str, Any] = {"rom_id": rom_id, "emulator": emulator}
+        if device_id is not None:
+            params["device_id"] = device_id
+        if slot is not None:
+            params["slot"] = slot
+        if overwrite:
+            params["overwrite"] = "true"
+
+        if save_id is not None:
+            return self._http.upload_multipart(
+                f"/api/saves/{save_id}", file_path, method="PUT", params=params
+            )
+        return self._http.upload_multipart("/api/saves", file_path, method="POST", params=params)
+
+    def download_save(
+        self,
+        save_id: int,
+        dest_path: Path,
+        *,
+        device_id: str | None = None,
+        optimistic: bool = True,
+    ) -> DownloadResult:
+        """GET /api/saves/{id}/content — stream a save to disk.
+
+        With `device_id` and `optimistic=True` (RomM's default), the server
+        records the device's `last_synced_at` as part of the download —
+        saves an extra round-trip vs. confirming after the fact. Pass
+        `optimistic=False` and call `confirm_download` separately when the
+        client wants to commit only after a successful local write.
+        """
+        path = f"/api/saves/{save_id}/content"
+        params: dict[str, Any] = {}
+        if device_id is not None:
+            params["device_id"] = device_id
+            if not optimistic:
+                params["optimistic"] = "false"
+        if params:
+            qs = urllib.parse.urlencode(params)
+            path = f"{path}?{qs}"
+        return self._http.download(path, dest_path)
+
+    def confirm_download(self, save_id: int, device_id: str) -> dict[str, Any]:
+        """POST /api/saves/{id}/downloaded — used when `optimistic=False`."""
+        return self._http.post_json(
+            f"/api/saves/{save_id}/downloaded",
+            {"device_id": device_id},
+        )
+
+    def delete_saves(self, save_ids: list[int]) -> list[int]:
+        """POST /api/saves/delete — bulk delete by ID. Returns ids actually deleted."""
+        result = self._http.post_json("/api/saves/delete", {"saves": save_ids})
+        return result if isinstance(result, list) else []
+
+    # ------------------------------------------------------------------
+    # Devices (RomM's per-device sync model)
+    # ------------------------------------------------------------------
+
+    def register_device(
+        self,
+        *,
+        name: str,
+        platform: str,
+        client: str,
+        client_version: str,
+        hostname: str | None = None,
+        mac_address: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /api/devices — register this client as a sync device.
+
+        RomM dedups by fingerprint (mac_address/hostname/platform) when
+        `allow_existing=true` (the default we send). On idempotent
+        re-registration the server returns 200 with the existing
+        `device_id`; on first-time registration it returns 201 with the
+        newly-minted UUID. Either way the response carries
+        `{device_id, name, created_at}`.
+        """
+        body: dict[str, Any] = {
+            "name": name,
+            "platform": platform,
+            "client": client,
+            "client_version": client_version,
+            "allow_existing": True,
+        }
+        if hostname is not None:
+            body["hostname"] = hostname
+        if mac_address is not None:
+            body["mac_address"] = mac_address
+        return self._http.post_json("/api/devices", body)
