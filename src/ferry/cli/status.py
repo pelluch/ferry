@@ -15,7 +15,11 @@ from pathlib import Path
 import click
 
 from ferry import __version__
-from ferry.adapters.retroarch_paths import discover_retroarch_saves
+from ferry.adapters.retroarch_paths import (
+    RetroArchInstall,
+    discover_retroarch_installs,
+    select_active_install,
+)
 from ferry.adapters.sidecar import sidecar_path_for
 from ferry.adapters.state_store import default_state_path, load_state
 from ferry.config import ConfigError, load_config
@@ -76,17 +80,53 @@ def status(ctx: click.Context) -> None:
 
     click.echo("")
     click.echo("[saves]")
-    ra = discover_retroarch_saves()
-    if ra is None:
-        click.echo("  retroarch:   (not detected)")
-    else:
-        click.echo(f"  retroarch:   {ra.source} @ {ra.saves_dir}")
+    _print_retroarch_status()
 
     if state.roms and config.destination is not None:
         _print_reconcile(state, config)
     elif not state.roms:
         click.echo("")
         click.echo("(state is empty — first sync will populate)")
+
+
+def _print_retroarch_status() -> None:
+    """One-line install summary, plus listing all candidates when ambiguous."""
+    installs = discover_retroarch_installs()
+    if not installs:
+        click.echo("  retroarch:   (not detected)")
+        return
+
+    active = select_active_install(installs)
+    if active is None:
+        # 2+ installs with saves — surface the conflict so the user knows
+        # ferry won't sync until they disambiguate.
+        click.echo("  retroarch:   AMBIGUOUS — multiple active installs detected:")
+        for install in installs:
+            _print_install_line(install, indent="    ")
+        click.echo("    (set [saves.retroarch_install] in config to pick one)")
+        return
+
+    _print_install_line(active, indent="  retroarch:   ")
+    if len(installs) > 1:
+        click.echo(
+            f"    (out of {len(installs)} detected; selected because "
+            f"{'has active saves' if active.has_saves else 'priority order'})"
+        )
+
+
+def _print_install_line(install: RetroArchInstall, *, indent: str) -> None:
+    layout = _layout_label(install)
+    click.echo(f"{indent}{install.source} @ {install.savefile_directory} ({layout})")
+
+
+def _layout_label(install: RetroArchInstall) -> str:
+    """Compact human-readable layout summary."""
+    flags = []
+    if install.sort_savefiles_by_content_enable:
+        flags.append("by-content")
+    if install.sort_savefiles_enable:
+        flags.append("by-core")
+    return ", ".join(flags) if flags else "flat"
 
 
 def _print_reconcile(state: LibraryState, config: Config) -> None:

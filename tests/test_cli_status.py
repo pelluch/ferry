@@ -156,11 +156,28 @@ def test_status_reports_no_retroarch_when_absent(tmp_path: Path, monkeypatch) ->
     assert "retroarch:   (not detected)" in result.output
 
 
-def test_status_reports_retroarch_install_when_present(tmp_path: Path, monkeypatch) -> None:
-    """RetroDECK-flatpak saves dir present → status surfaces it."""
+def _write_ra_cfg(home: Path, config_root_rel: str, body: str) -> Path:
+    cfg_root = home / config_root_rel
+    cfg_root.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_root / "retroarch.cfg"
+    cfg.write_text(body)
+    return cfg
+
+
+def test_status_reports_retrodeck_install_with_external_savefile_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """RetroDECK overrides savefile_directory; status should show that path."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    saves_dir = tmp_path / ".var/app/net.retrodeck.retrodeck/config/retroarch/saves"
+    saves_dir = tmp_path / "retrodeck/saves"
     saves_dir.mkdir(parents=True)
+    _write_ra_cfg(
+        tmp_path,
+        ".var/app/net.retrodeck.retrodeck/config/retroarch",
+        f'savefile_directory = "{saves_dir}"\n'
+        'sort_savefiles_by_content_enable = "true"\n'
+        'sort_savefiles_enable = "false"\n',
+    )
     cfg = write_config(tmp_path / "config.toml")
 
     runner = CliRunner()
@@ -168,3 +185,87 @@ def test_status_reports_retroarch_install_when_present(tmp_path: Path, monkeypat
     assert result.exit_code == 0, result.output
     assert "retroarch:   retrodeck-flatpak" in result.output
     assert str(saves_dir) in result.output
+    assert "by-content" in result.output
+
+
+def test_status_reports_native_install(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    saves_dir = tmp_path / ".config/retroarch/saves"
+    saves_dir.mkdir(parents=True)
+    _write_ra_cfg(
+        tmp_path,
+        ".config/retroarch",
+        'sort_savefiles_enable = "true"\n',
+    )
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "retroarch:   native" in result.output
+    assert "by-core" in result.output
+
+
+def test_status_flags_ambiguity_when_multiple_installs_have_saves(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two installs both have files in their savefile_directory — surface
+    the ambiguity rather than silently picking one."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # RetroDECK config with savefile_directory pointing at ~/retrodeck/saves
+    rd_saves = tmp_path / "retrodeck/saves"
+    rd_saves.mkdir(parents=True)
+    (rd_saves / "Mario.srm").write_bytes(b"x")
+    _write_ra_cfg(
+        tmp_path,
+        ".var/app/net.retrodeck.retrodeck/config/retroarch",
+        f'savefile_directory = "{rd_saves}"\n',
+    )
+
+    # Native config with default <config>/saves/ as savefile_directory
+    native_saves = tmp_path / ".config/retroarch/saves"
+    native_saves.mkdir(parents=True)
+    (native_saves / "Sonic.srm").write_bytes(b"y")
+    _write_ra_cfg(
+        tmp_path,
+        ".config/retroarch",
+        f'savefile_directory = "{native_saves}"\n',
+    )
+
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "AMBIGUOUS" in result.output
+    assert "retrodeck-flatpak" in result.output
+    assert "native" in result.output
+    assert "[saves.retroarch_install]" in result.output
+
+
+def test_status_picks_install_with_active_saves_when_other_is_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two installs detected, only one has saves — that's the active one."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # RetroDECK exists but no saves
+    _write_ra_cfg(
+        tmp_path,
+        ".var/app/net.retrodeck.retrodeck/config/retroarch",
+        f'savefile_directory = "{tmp_path / "retrodeck/saves"}"\n',
+    )
+
+    # Native install with actual saves
+    native_saves = tmp_path / ".config/retroarch/saves"
+    native_saves.mkdir(parents=True)
+    (native_saves / "Mario.srm").write_bytes(b"x")
+    _write_ra_cfg(tmp_path, ".config/retroarch", "")
+
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "retroarch:   native" in result.output
+    assert "out of 2 detected" in result.output
+    assert "AMBIGUOUS" not in result.output

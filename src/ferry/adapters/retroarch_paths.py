@@ -1,52 +1,62 @@
-"""Discover the on-disk location of RetroArch's saves directory.
+"""Discover RetroArch installations by parsing their `retroarch.cfg` files.
 
-RetroArch stores SRM/state files under its config tree, but the config tree
-itself lives in different places depending on how RetroArch was installed.
-The three installations we recognize, in detection priority order:
+Replaces the convention-based discovery from the previous checkpoint. The
+old approach assumed `<config_root>/saves/` was always the savefile
+directory — true for native RetroArch and the libretro flatpak, but wrong
+for RetroDECK (which sets `savefile_directory = "~/retrodeck/saves"` in
+its bundled RetroArch's cfg, pointing OUTSIDE the flatpak's own tree).
 
-1. **RetroDECK** — bundles its own RetroArch inside the
-   `net.retrodeck.retrodeck` flatpak. The user has explicitly opted into
-   RetroDECK's curated install, so this wins ahead of any libretro flatpak
-   they might also have.
-2. **libretro flatpak** (`org.libretro.RetroArch`) — what EmuDeck installs
-   and what most "I just want RetroArch" Linux users on Steam Deck end up
-   with.
-3. **Native** (`~/.config/retroarch/`) — distro-package or AppImage installs
-   that put their config under XDG defaults.
+The new model probes three known cfg locations, parses each, and returns
+all that exist. A separate selector picks the active one for save sync —
+single install: that one; multiple installs: prefer the one with files
+in its configured savefile_directory (the user actively plays through it),
+otherwise None and the caller surfaces the ambiguity.
 
-Multi-installation environments are real (a user might keep RetroDECK for
-RetroDECK-only games and a separate native RetroArch for handheld play),
-but ferry's save-sync model treats RetroArch as a single backend. The user
-picks one — explicitly via config in a later checkpoint, or implicitly via
-the priority order here. Shipping a "two RetroArchs at once" mode without
-clear semantics around which one owns a save would be a footgun.
+The "no saves anywhere" case is handled by treating any install as
+acceptable (priority order) since there's nothing to sync regardless.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from ferry.adapters.retroarch_config import parse_retroarch_cfg
+
+logger = logging.getLogger(__name__)
+
 RetroArchSource = Literal["retrodeck-flatpak", "libretro-flatpak", "native"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RetroArchInstall:
-    """A RetroArch installation found on disk.
+    """A RetroArch install present on disk, with its parsed save settings.
 
-    `saves_dir` is the absolute path to RetroArch's saves tree
-    (`<config_root>/saves/`). Saves themselves live one or more levels deeper
-    keyed by core (e.g., `saves/snes9x/Super Mario World.srm`); ferry's
-    SaveBackend handles that walking.
+    `savefile_directory` is the *resolved absolute* path RetroArch writes
+    SRMs to — either the cfg's explicit override or the convention default
+    of `<config_root>/saves/`. Always a Path; callers don't need to plumb
+    fallback logic.
+
+    `has_saves` is True iff any file currently lives under
+    `savefile_directory`. Used by the selector to disambiguate between
+    multiple installs.
     """
 
-    saves_dir: Path
     source: RetroArchSource
+    cfg_path: Path
+    config_root: Path
+    savefile_directory: Path
+    sort_savefiles_enable: bool
+    sort_savefiles_by_content_enable: bool
+    has_saves: bool
 
 
-# Detection table — labels must match RetroArchSource literal values.
-# Each entry is (source, config-root-relative-to-home).
+# (source, config_root_relative_to_home). Order is preference — RetroDECK
+# first since opting into RetroDECK is an opinionated choice that suggests
+# active use; libretro flatpak before native because flatpak installs are
+# typically more recent than long-tail native ones.
 _FLAVORS: tuple[tuple[RetroArchSource, str], ...] = (
     ("retrodeck-flatpak", ".var/app/net.retrodeck.retrodeck/config/retroarch"),
     ("libretro-flatpak", ".var/app/org.libretro.RetroArch/config/retroarch"),
@@ -54,19 +64,76 @@ _FLAVORS: tuple[tuple[RetroArchSource, str], ...] = (
 )
 
 
-def discover_retroarch_saves(home: Path | None = None) -> RetroArchInstall | None:
-    """Probe known RetroArch install locations and return the first match.
+def discover_retroarch_installs(home: Path | None = None) -> list[RetroArchInstall]:
+    """Return every RetroArch install whose `retroarch.cfg` parses successfully.
 
-    A match requires the saves directory itself to exist as a directory —
-    not just the config root. RetroArch only creates `saves/` once a save
-    has been written, so a fresh install with no plays yet won't be
-    detected. That's the right call: ferry has nothing to sync until the
-    user has actually saved something, and a missing dir is the most
-    reliable "no saves yet" signal across all three install flavors.
+    Order matches `_FLAVORS` — RetroDECK first, then libretro flatpak, then
+    native — so callers can use position as a tiebreaker.
     """
     home = home or Path.home()
-    for source, config_root in _FLAVORS:
-        saves_dir = home / config_root / "saves"
-        if saves_dir.is_dir():
-            return RetroArchInstall(saves_dir=saves_dir, source=source)
-    return None
+    installs: list[RetroArchInstall] = []
+    for source, config_root_rel in _FLAVORS:
+        config_root = home / config_root_rel
+        cfg_path = config_root / "retroarch.cfg"
+        settings = parse_retroarch_cfg(cfg_path, home=home)
+        if settings is None:
+            continue
+        savefile_dir = settings.savefile_directory or (config_root / "saves")
+        installs.append(
+            RetroArchInstall(
+                source=source,
+                cfg_path=cfg_path,
+                config_root=config_root,
+                savefile_directory=savefile_dir,
+                sort_savefiles_enable=settings.sort_savefiles_enable,
+                sort_savefiles_by_content_enable=settings.sort_savefiles_by_content_enable,
+                has_saves=_dir_has_save_files(savefile_dir),
+            )
+        )
+    return installs
+
+
+def select_active_install(installs: list[RetroArchInstall]) -> RetroArchInstall | None:
+    """Pick the RetroArch install ferry should sync from, or None if ambiguous.
+
+    Decision table:
+      - 0 installs → None.
+      - 1 install → that one.
+      - 2+ installs:
+        - Exactly one has `has_saves=True` → that one (active use signal).
+        - 0 have saves → first by priority order (nothing to sync; pick any).
+        - 2+ have saves → None (ambiguous; caller should ask the user).
+
+    Returning None on ambiguity is the safe default — uploading saves from
+    the wrong install would polish off the wrong copy at conflict time.
+    """
+    if not installs:
+        return None
+    if len(installs) == 1:
+        return installs[0]
+    with_saves = [i for i in installs if i.has_saves]
+    if len(with_saves) == 1:
+        return with_saves[0]
+    if not with_saves:
+        return installs[0]  # priority-order fallback; nothing at risk
+    return None  # ambiguous
+
+
+# Save-file extensions we count as evidence of active RetroArch use.
+# Other files (`.directory` from KDE, stale `.log`s from standalone emulators
+# accidentally dumping into the saves dir, etc.) don't count — we want a
+# strong signal that someone actually saves through this install.
+_SAVE_EXTENSIONS = frozenset({".srm", ".sav", ".rtc"})
+
+
+def _dir_has_save_files(path: Path) -> bool:
+    """True iff `path` contains any file with a recognized RetroArch save extension."""
+    if not path.is_dir():
+        return False
+    try:
+        for entry in path.rglob("*"):
+            if entry.is_file() and entry.suffix.lower() in _SAVE_EXTENSIONS:
+                return True
+    except OSError:
+        return False
+    return False
