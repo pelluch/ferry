@@ -144,3 +144,27 @@ def test_status_resolves_platform_dir_in_output(tmp_path: Path, monkeypatch) -> 
     assert result.exit_code == 0, result.output
     # Slug → resolved dir mapping is surfaced.
     assert "game-boy-advance → gba/" in result.output
+
+
+def test_status_reports_no_retroarch_when_absent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "[saves]" in result.output
+    assert "retroarch:   (not detected)" in result.output
+
+
+def test_status_reports_retroarch_install_when_present(tmp_path: Path, monkeypatch) -> None:
+    """RetroDECK-flatpak saves dir present → status surfaces it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    saves_dir = tmp_path / ".var/app/net.retrodeck.retrodeck/config/retroarch/saves"
+    saves_dir.mkdir(parents=True)
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "retroarch:   retrodeck-flatpak" in result.output
+    assert str(saves_dir) in result.output

@@ -15,6 +15,7 @@ from pathlib import Path
 import click
 
 from ferry import __version__
+from ferry.adapters.retroarch_paths import discover_retroarch_saves
 from ferry.adapters.sidecar import sidecar_path_for
 from ferry.adapters.state_store import default_state_path, load_state
 from ferry.config import ConfigError, load_config
@@ -72,6 +73,14 @@ def status(ctx: click.Context) -> None:
             click.echo("  bios_base:   (per-emulator)")
         else:
             click.echo(f"  bios_base:   {d.bios_base} {_path_status(d.bios_base)}")
+
+    click.echo("")
+    click.echo("[saves]")
+    ra = discover_retroarch_saves()
+    if ra is None:
+        click.echo("  retroarch:   (not detected)")
+    else:
+        click.echo(f"  retroarch:   {ra.source} @ {ra.saves_dir}")
 
     if state.roms and config.destination is not None:
         _print_reconcile(state, config)
