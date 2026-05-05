@@ -129,9 +129,17 @@ def _resolve_bundled(source: ESDESource, probe: Path) -> Path | None:
     if source == "retrodeck-flatpak":
         if not probe.is_dir():
             return None
-        # /var/lib/flatpak/app/net.retrodeck.retrodeck/x86_64/stable/<hash>/files/...
+        # The REAL bundled ES-DE systems list ships under
+        # `components/es-de/share/es-de/resources/systems/linux/es_systems.xml`
+        # (the same upstream-ES-DE path, just inside RetroDECK's flatpak
+        # tree). The file at `config/retrodeck/helper_files/es_systems.xml`
+        # is RetroDECK's empty-example template for custom systems, not the
+        # actual bundled list — picking it would yield 0 systems wrapped.
         candidates = sorted(
-            probe.glob("*/stable/*/files/retrodeck/config/retrodeck/helper_files/es_systems.xml")
+            probe.glob(
+                "*/stable/*/files/retrodeck/components/es-de/share/"
+                "es-de/resources/systems/linux/es_systems.xml"
+            )
         )
         return candidates[-1] if candidates else None
     return None

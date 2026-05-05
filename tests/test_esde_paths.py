@@ -74,11 +74,11 @@ def test_retrodeck_bundled_resolved_via_glob(tmp_path: Path) -> None:
     fp_root = tmp_path / "fake-flatpak/net.retrodeck.retrodeck"
     older_bundled = (
         fp_root
-        / "x86_64/stable/aaa1111/files/retrodeck/config/retrodeck/helper_files/es_systems.xml"
+        / "x86_64/stable/aaa1111/files/retrodeck/components/es-de/share/es-de/resources/systems/linux/es_systems.xml"
     )
     newer_bundled = (
         fp_root
-        / "x86_64/stable/zzz9999/files/retrodeck/config/retrodeck/helper_files/es_systems.xml"
+        / "x86_64/stable/zzz9999/files/retrodeck/components/es-de/share/es-de/resources/systems/linux/es_systems.xml"
     )
     for f in (older_bundled, newer_bundled):
         f.parent.mkdir(parents=True)
