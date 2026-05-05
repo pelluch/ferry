@@ -38,6 +38,7 @@ from ferry.adapters.state_store import (
 from ferry.config import ConfigError, SavesConfig, SyncConfig, load_config
 from ferry.config.schema import Config
 from ferry.domain.platforms import resolve_platform_dir
+from ferry.domain.save_plan import PlannedSaveAction, SavePlan
 from ferry.domain.state import LibraryState
 from ferry.domain.sync_plan import (
     AddAction,
@@ -164,7 +165,7 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
 
             if dry_run:
                 _print_plan(plan, full=full, config=config)
-                _print_save_sync_preview(config)
+                _print_save_sync_preview(config, api, state, full=full)
                 return
 
             # Purge expired trash *only* on the real-run path. Dry-run must
@@ -225,12 +226,16 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
         raise click.ClickException(str(e)) from e
 
 
-def _print_save_sync_preview(config: Config) -> None:
+def _print_save_sync_preview(
+    config: Config, api: RommApi, state: LibraryState, *, full: bool
+) -> None:
     """Show what `ferry sync` (real run) WOULD do for each save backend.
 
-    Resolution-only — no HTTP calls, no state mutation. Mirrors the same
-    install-selection logic as the real run so users can verify their
-    `[saves].*_install` settings before committing to a sync.
+    Builds read-only backends and calls `.plan(state)` — does ONE GET
+    per backend (`/api/saves`); no device registration, no upload, no
+    download, no state mutation. Falls back to install-selection-only
+    messaging when an install isn't viable (no install detected, raw
+    memcard mode, dolphin-tool missing, etc.).
     """
     if config.saves is None:
         return  # silent — feature is opt-in
@@ -238,53 +243,69 @@ def _print_save_sync_preview(config: Config) -> None:
     if not config.saves.enabled:
         click.echo("Save sync: disabled ([saves].enabled = false)")
         return
-    _preview_retroarch(config)
-    _preview_dolphin(config)
+
+    device_id = state.device_id  # may be None — backend's plan() tolerates that
+
+    _preview_retroarch(config, api, state, device_id=device_id, full=full)
+    _preview_dolphin(config, api, state, device_id=device_id, full=full)
 
 
-def _preview_retroarch(config: Config) -> None:
+def _preview_retroarch(
+    config: Config,
+    api: RommApi,
+    state: LibraryState,
+    *,
+    device_id: str | None,
+    full: bool,
+) -> None:
     assert config.saves is not None
     installs = discover_retroarch_installs()
     if not installs:
         click.echo("Save sync (RetroArch): would skip (no install detected)")
         return
-    if config.saves.retroarch_install is not None:
-        match = next(
-            (i for i in installs if i.source == config.saves.retroarch_install),
-            None,
-        )
+    install = _resolve_retroarch_install_for_preview(config.saves, installs)
+    if install is None:
+        return  # message already printed
+    backend = RetroArchSaveBackend(install=install, api=api, device_id=device_id or "", log=logger)
+    click.echo(f"Save sync (RetroArch): targeting {install.source} @ {install.savefile_directory}")
+    plan = backend.plan(state)
+    _print_save_plan(plan, full=full)
+
+
+def _resolve_retroarch_install_for_preview(
+    saves_cfg: SavesConfig, installs: list[RetroArchInstall]
+) -> RetroArchInstall | None:
+    if saves_cfg.retroarch_install is not None:
+        match = next((i for i in installs if i.source == saves_cfg.retroarch_install), None)
         if match is None:
             click.echo(
                 f"Save sync (RetroArch): would skip ([saves].retroarch_install = "
-                f"{config.saves.retroarch_install!r} but no install matches)"
+                f"{saves_cfg.retroarch_install!r} but no install matches)"
             )
-            return
-        click.echo(
-            f"Save sync (RetroArch): would target {match.source} @ {match.savefile_directory} "
-            f"(selected via [saves].retroarch_install)"
-        )
-        return
+        return match
     active = select_active_install(installs)
     if active is None:
         click.echo(
             "Save sync (RetroArch): would skip (multiple active installs — "
             "set [saves].retroarch_install)"
         )
-        return
-    why = "has active saves" if active.has_saves else "priority order"
-    click.echo(
-        f"Save sync (RetroArch): would target {active.source} @ {active.savefile_directory} "
-        f"(selected because {why})"
-    )
+    return active
 
 
-def _preview_dolphin(config: Config) -> None:
+def _preview_dolphin(
+    config: Config,
+    api: RommApi,
+    state: LibraryState,
+    *,
+    device_id: str | None,
+    full: bool,
+) -> None:
     assert config.saves is not None
     installs = discover_dolphin_installs()
     if not installs:
         click.echo("Save sync (Dolphin): would skip (no install detected)")
         return
-    install = _select_dolphin_install_for_preview(config.saves, installs)
+    install = _resolve_dolphin_install_for_preview(config.saves, installs)
     if install is None:
         return  # message already printed
     if install.slot_a_mode != "gci_folder":
@@ -293,13 +314,28 @@ def _preview_dolphin(config: Config) -> None:
             f"{install.slot_a_mode!r} (need GCI Folder)"
         )
         return
-    if discover_dolphin_tool() is None:
+    tool = discover_dolphin_tool()
+    if tool is None:
         click.echo("Save sync (Dolphin): would skip (dolphin-tool not found)")
         return
-    click.echo(f"Save sync (Dolphin): would target {install.source} @ {install.saves_root}")
+    if config.destination is None:
+        return  # caller-side guard; defensive
+    cache = DiscHeaderCache(default_cache_path())
+    backend = DolphinSaveBackend(
+        install=install,
+        api=api,
+        device_id=device_id or "",
+        tool=tool,
+        roms_base=config.destination.roms_base,
+        cache=cache,
+        log=logger,
+    )
+    click.echo(f"Save sync (Dolphin): targeting {install.source} @ {install.saves_root}")
+    plan = backend.plan(state)
+    _print_save_plan(plan, full=full)
 
 
-def _select_dolphin_install_for_preview(
+def _resolve_dolphin_install_for_preview(
     saves_cfg: SavesConfig, installs: list[DolphinInstall]
 ) -> DolphinInstall | None:
     if saves_cfg.dolphin_install is not None:
@@ -317,6 +353,62 @@ def _select_dolphin_install_for_preview(
             "set [saves].dolphin_install)"
         )
     return active
+
+
+def _print_save_plan(plan: SavePlan, *, full: bool) -> None:
+    """Render a `SavePlan` in the existing dry-run output style."""
+    if plan.failed:
+        for f in plan.failed:
+            click.echo(f"  ✗ {f}")
+        return
+
+    summary: list[str] = []
+    if plan.to_upload:
+        summary.append(f"{len(plan.to_upload)} upload(s)")
+    if plan.to_download:
+        summary.append(f"{len(plan.to_download)} download(s)")
+    if plan.conflicts_resolved:
+        summary.append(f"{plan.conflicts_resolved} conflict(s) resolved")
+    if plan.ambiguous:
+        summary.append(f"{len(plan.ambiguous)} ambiguous (would skip)")
+    if plan.skipped:
+        summary.append(f"{plan.skipped} unchanged")
+    if plan.drop_prior_count:
+        summary.append(f"{plan.drop_prior_count} stale record(s) cleared")
+
+    if not summary:
+        click.echo("  (nothing to do)")
+        return
+    click.echo("  " + ", ".join(summary))
+
+    cap = None if full else _DEFAULT_PREVIEW
+    _print_planned_actions("  Would upload", plan.to_upload, "↑", cap)
+    _print_planned_actions("  Would download", plan.to_download, "↓", cap)
+    if plan.ambiguous:
+        click.echo("")
+        click.echo("  Ambiguous (would skip — re-evaluated next sync):")
+        shown = plan.ambiguous if cap is None else plan.ambiguous[:cap]
+        for entry in shown:
+            click.echo(f"    ? {entry}")
+        if cap is not None and len(plan.ambiguous) > cap:
+            click.echo(f"    ... and {len(plan.ambiguous) - cap} more")
+
+
+def _print_planned_actions(
+    title: str,
+    items: tuple[PlannedSaveAction, ...],
+    sigil: str,
+    cap: int | None,
+) -> None:
+    if not items:
+        return
+    click.echo("")
+    click.echo(f"{title} ({len(items)}):")
+    shown = items if cap is None else items[:cap]
+    for a in shown:
+        click.echo(f"    {sigil} {a.rom_name} — {a.save_filename} (slot={a.slot}, {a.reason})")
+    if cap is not None and len(items) > cap:
+        click.echo(f"    ... and {len(items) - cap} more (run with --full to list all)")
 
 
 def _prepare_save_backends(

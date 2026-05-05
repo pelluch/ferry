@@ -811,18 +811,22 @@ def test_sync_runs_save_sync_after_library_sync(tmp_path: Path, monkeypatch) -> 
 
 @respx.mock
 def test_dry_run_shows_save_sync_preview(tmp_path: Path, monkeypatch) -> None:
-    """--dry-run reports which RA install save sync would target — no HTTP calls
-    to /api/saves or /api/devices."""
+    """--dry-run reports the planned actions per backend — one GET to
+    /api/saves per backend, no /api/devices, no upload/download."""
     monkeypatch.setenv("HOME", str(tmp_path))
     roms_base = tmp_path / "roms"
     cfg = write_config_with_saves(tmp_path / "config.toml", roms_base=roms_base)
     _plant_native_ra(tmp_path)
 
     mock_endpoints(collections=[{"id": 1, "name": "Steam Deck"}], rom_items=[])
+    # plan() lists server saves; no auth/device-id required, empty list is fine.
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
     assert result.exit_code == 0, result.output
-    assert "Save sync (RetroArch): would target native" in result.output
+    assert "Save sync (RetroArch): targeting native" in result.output
+    # With nothing local and nothing on the server, the plan is empty.
+    assert "(nothing to do)" in result.output
 
 
 @respx.mock

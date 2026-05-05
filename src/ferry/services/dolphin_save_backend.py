@@ -43,7 +43,7 @@ import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from ferry.adapters.dolphin_paths import DolphinInstall
 from ferry.adapters.dolphin_saves import (
@@ -54,21 +54,15 @@ from ferry.adapters.dolphin_saves import (
 )
 from ferry.adapters.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
 from ferry.adapters.romm import RommApi, RommApiError
-from ferry.domain.save_conflicts import (
-    determine_action,
-    local_changed,
-    resolve_newest,
-    server_changed_fast,
-)
+from ferry.domain.save_conflicts import Classification, classify
+from ferry.domain.save_plan import PlannedSaveAction, SavePlan
 from ferry.domain.state import LibraryState, RomState, SaveRecord
 from ferry.services.save_backend import SaveSyncResult
 
 logger = logging.getLogger(__name__)
 
 _DOLPHIN_EMULATOR_LABEL = "dolphin"
-
-# Per-key action labels emitted internally for clarity.
-_Action = Literal["upload", "download", "skip", "ambiguous", "drop_prior"]
+_BACKEND_LABEL = "Dolphin"
 
 # Same datetime-tag pattern v2 uses — RomM's `_apply_datetime_tag` in
 # `backend/endpoints/saves.py` appends ` [YYYY-MM-DD_HH-MM-SS]` to every
@@ -225,88 +219,119 @@ class DolphinSaveBackend:
         prev: SaveRecord | None,
         result: SaveSyncResult,
     ) -> tuple[bool, SaveRecord | None]:
-        action = self._decide_action(
-            local, server, prev, result, rom_id=rom.rom_id, emulator=emulator, slot=slot
-        )
-        if action == "skip":
+        decision = _classify_for(local, server, prev)
+        if decision.conflict_resolved:
+            result.conflicts_resolved += 1
+        if decision.ambiguous_message is not None:
+            result.ambiguous.append(f"rom_id={rom.rom_id} ({decision.ambiguous_message})")
+
+        if decision.action == "skip":
             result.skipped += 1
             return False, None
-        if action == "ambiguous":
+        if decision.action == "ambiguous":
             return False, None
-        if action == "drop_prior":
+        if decision.action == "drop_prior":
             return True, None
-        if action == "upload":
+        if decision.action == "upload":
             assert local is not None
             outcome = self._do_upload(rom, local, prev, server, result)
             return (outcome is not None, outcome)
-        if action == "download":
+        if decision.action == "download":
             assert server is not None
             outcome = self._do_download(rom, emulator, slot, server, result)
             return (outcome is not None, outcome)
         return False, None  # defensive
 
-    def _decide_action(
-        self,
-        local: LocalSave | None,
-        server: dict[str, Any] | None,
-        prev: SaveRecord | None,
-        result: SaveSyncResult,
-        *,
-        rom_id: int,
-        emulator: str,
-        slot: str,
-    ) -> _Action:
-        """Pure decision logic — no I/O."""
-        if local is None and server is None:
-            return "drop_prior" if prev is not None else "skip"
-        if local is None and server is not None:
-            return "download"
-        if local is not None and server is None:
-            return "upload"
+    # ------------------------------------------------------------------
+    # Plan (read-only — what `.sync()` would do)
+    # ------------------------------------------------------------------
 
-        assert local is not None and server is not None
-        local_md5 = local.local_md5
-        server_md5 = server.get("content_hash") or ""
-        server_size = server.get("file_size_bytes")
-        server_updated_at = server.get("updated_at") or ""
+    def plan(self, state: LibraryState) -> SavePlan:
+        """Compute what `.sync(state)` would do, without performing it.
 
-        if prev is None:
-            resolution = resolve_newest(
-                local_mtime=local.local_mtime,
-                server_updated_at=server_updated_at,
+        Same shape and intent as v2's `RetroArchSaveBackend.plan`. Reads
+        local saves, fetches server saves (one GET; tolerates a None
+        device_id when the backend was built for dry-run without
+        registration), runs the same per-key decision logic, and
+        records each intended action instead of executing.
+        """
+        local_saves, walker_warnings = list_local_saves(
+            self._install,
+            state.roms.values(),
+            roms_base=self._roms_base,
+            tool=self._tool,
+            cache=self._cache,
+        )
+
+        try:
+            server_saves = self._api.list_saves(device_id=self._device_id or None)
+        except RommApiError as exc:
+            return SavePlan(
+                backend_label=_BACKEND_LABEL,
+                failed=(f"could not list server saves: {exc}",),
+                warnings=tuple(walker_warnings),
             )
-            if resolution == "ambiguous":
-                _flag_ambiguous(
-                    result, rom_id, local.save_filename, "first sync — within tolerance"
-                )
-                return "ambiguous"
-            if local_md5 == server_md5:
-                return "skip"
-            result.conflicts_resolved += 1
-            return "upload" if resolution == "upload" else "download"
 
-        l_changed = local_changed(local_md5, prev.last_sync_md5)
-        s_changed = server_changed_fast(
-            stored_updated_at=prev.last_sync_server_updated_at,
-            stored_size=prev.last_sync_server_size,
-            server_updated_at=server_updated_at,
-            server_size=server_size,
-        )
-        if s_changed is None:
-            s_changed = server_md5 != prev.last_sync_md5
-        action = determine_action(local_changed_=l_changed, server_changed=s_changed)
-        if action != "conflict":
-            return action  # type: ignore[return-value]
+        local_by_key = {(ls.rom_id, ls.emulator, ls.slot): ls for ls in local_saves}
+        server_by_key = _index_dolphin_server_saves(server_saves)
+        prev_by_key = _index_dolphin_prior_records(state.roms.values())
+        all_keys = set(local_by_key) | set(server_by_key) | set(prev_by_key)
 
-        resolution = resolve_newest(
-            local_mtime=local.local_mtime,
-            server_updated_at=server_updated_at,
+        to_upload: list[PlannedSaveAction] = []
+        to_download: list[PlannedSaveAction] = []
+        ambiguous: list[str] = []
+        skipped = 0
+        drop_count = 0
+        conflict_count = 0
+
+        for key in sorted(all_keys):
+            rom_id, emulator, slot = key
+            rom = state.roms.get(rom_id)
+            if rom is None:
+                continue
+            local = local_by_key.get(key)
+            server = server_by_key.get(key)
+            prev = prev_by_key.get(key)
+            decision = _classify_for(local, server, prev)
+            if decision.conflict_resolved:
+                conflict_count += 1
+            if decision.ambiguous_message is not None:
+                ambiguous.append(f"rom_id={rom_id} ({decision.ambiguous_message})")
+            if decision.action == "skip":
+                skipped += 1
+                continue
+            if decision.action == "drop_prior":
+                drop_count += 1
+                continue
+            if decision.action == "ambiguous":
+                continue
+            save_filename, slot_for_display = _filename_and_slot_for_action(
+                decision.action, local, server, slot
+            )
+            entry = PlannedSaveAction(
+                rom_id=rom_id,
+                rom_name=rom.name,
+                emulator=emulator,
+                slot=slot_for_display,
+                save_filename=save_filename,
+                direction=decision.action,
+                reason=decision.reason,
+            )
+            if decision.action == "upload":
+                to_upload.append(entry)
+            else:
+                to_download.append(entry)
+
+        return SavePlan(
+            backend_label=_BACKEND_LABEL,
+            to_upload=tuple(to_upload),
+            to_download=tuple(to_download),
+            skipped=skipped,
+            conflicts_resolved=conflict_count,
+            drop_prior_count=drop_count,
+            ambiguous=tuple(ambiguous),
+            warnings=tuple(walker_warnings),
         )
-        if resolution == "ambiguous":
-            _flag_ambiguous(result, rom_id, local.save_filename, "conflict within tolerance")
-            return "ambiguous"
-        result.conflicts_resolved += 1
-        return "upload" if resolution == "upload" else "download"
 
     # ------------------------------------------------------------------
     # Execution
@@ -536,5 +561,43 @@ def _rom_as_kwargs(rom: RomState) -> dict[str, Any]:
     }
 
 
-def _flag_ambiguous(result: SaveSyncResult, rom_id: int, filename: str, reason: str) -> None:
-    result.ambiguous.append(f"rom_id={rom_id} ({filename}): {reason}")
+def _classify_for(
+    local: LocalSave | None,
+    server: dict[str, Any] | None,
+    prev: SaveRecord | None,
+) -> Classification:
+    """Adapter from Dolphin's typed inputs to the shared `classify` primitive."""
+    server_md5 = server.get("content_hash") if server else None
+    server_size = server.get("file_size_bytes") if server else None
+    server_updated_at = server.get("updated_at") if server else None
+    return classify(
+        local_md5=local.local_md5 if local else None,
+        local_mtime=local.local_mtime if local else None,
+        local_save_filename=local.save_filename if local else None,
+        server_md5=server_md5 if isinstance(server_md5, str) else None,
+        server_size=server_size if isinstance(server_size, int) else None,
+        server_updated_at=server_updated_at if isinstance(server_updated_at, str) else None,
+        last_sync_md5=prev.last_sync_md5 if prev else None,
+        last_sync_server_size=prev.last_sync_server_size if prev else None,
+        last_sync_server_updated_at=prev.last_sync_server_updated_at if prev else None,
+    )
+
+
+def _filename_and_slot_for_action(
+    direction: str,
+    local: LocalSave | None,
+    server: dict[str, Any] | None,
+    slot: str,
+) -> tuple[str, str]:
+    """Pick the filename + slot label to display for a planned action.
+
+    For uploads: the .gci as it exists on disk now. For downloads: the
+    server's `file_name` with RomM's datetime tag stripped (what would
+    land at `<saves_root>/<region>/Card A/`).
+    """
+    if direction == "upload" and local is not None:
+        return local.save_filename, slot
+    if direction == "download" and server is not None:
+        raw = server.get("file_name") or ""
+        return _strip_datetime_tag(raw) if raw else "(unknown)", slot
+    return "(unknown)", slot
