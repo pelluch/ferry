@@ -161,8 +161,59 @@ def test_discover_returns_none_when_nothing_available(tmp_path: Path) -> None:
         home=tmp_path,
         flatpak_dirs=(tmp_path / "user-flatpak", tmp_path / "system-flatpak"),
         path_env={"PATH": str(tmp_path / "empty-path")},
+        flatpak_info_path=tmp_path / "no-flatpak-info",
     )
     assert result is None
+
+
+def test_discover_prefers_in_sandbox_when_running_inside_retrodeck(tmp_path: Path) -> None:
+    """When ferry runs INSIDE RetroDECK's sandbox (e.g., via an ES-DE launch
+    wrapper), the in-sandbox strategy beats the flatpak-app-installed check.
+
+    The sandbox-internal binary at `/app/retrodeck/...` is invokable directly
+    (we're already inside the sandbox); we skip the `flatpak run` wrapper
+    which would require `--talk-name=org.freedesktop.Flatpak` permission
+    that RetroDECK's manifest doesn't grant.
+    """
+    flatpak_info = tmp_path / ".flatpak-info"
+    flatpak_info.write_text("[Application]\nname=net.retrodeck.retrodeck\n")
+    # Even with the host-side flatpak app dir present, in-sandbox wins.
+    user_fp = tmp_path / "user-flatpak"
+    user_fp.mkdir()
+    _make_flatpak_app(user_fp, "net.retrodeck.retrodeck")
+
+    result = discover_dolphin_tool(
+        home=tmp_path,
+        flatpak_dirs=(user_fp,),
+        path_env={"PATH": ""},
+        flatpak_info_path=flatpak_info,
+    )
+    assert result is not None
+    assert result.source == "retrodeck-in-sandbox"
+    # No `flatpak run` prefix — direct sh invocation against /app/...
+    assert result.argv_prefix[0] == "sh"
+    assert "flatpak" not in result.argv_prefix
+
+
+def test_discover_skips_in_sandbox_for_other_flatpaks(tmp_path: Path) -> None:
+    """`/.flatpak-info` for a different app shouldn't trigger the in-sandbox
+    path — it's RetroDECK-specific."""
+    flatpak_info = tmp_path / ".flatpak-info"
+    flatpak_info.write_text("[Application]\nname=org.libretro.RetroArch\n")
+
+    user_fp = tmp_path / "user-flatpak"
+    user_fp.mkdir()
+    _make_flatpak_app(user_fp, "net.retrodeck.retrodeck")
+
+    result = discover_dolphin_tool(
+        home=tmp_path,
+        flatpak_dirs=(user_fp,),
+        path_env={"PATH": ""},
+        flatpak_info_path=flatpak_info,
+    )
+    # Falls through to the standard retrodeck-flatpak (host-side) strategy.
+    assert result is not None
+    assert result.source == "retrodeck-flatpak"
 
 
 def test_discover_prefers_retrodeck(tmp_path: Path) -> None:

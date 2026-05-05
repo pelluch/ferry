@@ -40,13 +40,16 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-DolphinToolSource = Literal["retrodeck-flatpak", "emudeck-flatpak", "system-path"]
+DolphinToolSource = Literal[
+    "retrodeck-in-sandbox", "retrodeck-flatpak", "emudeck-flatpak", "system-path"
+]
 
 _RETRODECK_APP_ID = "net.retrodeck.retrodeck"
 _EMUDECK_APP_ID = "org.DolphinEmu.dolphin-emu"
 _RETRODECK_TOOL_PATH = "/app/retrodeck/components/dolphin/bin/dolphin-tool"
 _EMUDECK_TOOL_PATH = "/app/bin/dolphin-tool"
 _SYSTEM_BINARY_NAMES = ("dolphin-tool", "dolphin-emu-tool")
+_FLATPAK_INFO_PATH = Path("/.flatpak-info")
 
 # Shell snippet for the RetroDECK flatpak invocation. RetroDECK ships
 # extra runtime libraries (currently libevdev) under its own
@@ -156,6 +159,7 @@ def discover_dolphin_tool(
     *,
     flatpak_dirs: tuple[Path, ...] | None = None,
     path_env: Mapping[str, str] | None = None,
+    flatpak_info_path: Path | None = None,
 ) -> DolphinTool | None:
     """Find the first usable dolphin-tool, in priority order.
 
@@ -167,12 +171,34 @@ def discover_dolphin_tool(
       - `flatpak_dirs`: roots to scan for installed flatpak apps.
         Defaults to standard system + user flatpak install locations.
       - `path_env`: PATH lookup environment. Defaults to `os.environ`.
+      - `flatpak_info_path`: where to look for `/.flatpak-info` (used
+        to detect "we're running inside RetroDECK's sandbox").
     """
     home = home or Path.home()
     flatpak_dirs = flatpak_dirs or (
         home / ".local/share/flatpak/app",
         Path("/var/lib/flatpak/app"),
     )
+    flatpak_info_path = flatpak_info_path or _FLATPAK_INFO_PATH
+
+    # Are we already running INSIDE the RetroDECK flatpak's sandbox? If
+    # so, prefer direct in-sandbox invocation: `/app/retrodeck/...` is
+    # accessible without `flatpak run` (we're already there), and we
+    # don't need talk-name=org.freedesktop.Flatpak (which RetroDECK's
+    # manifest lacks, so `flatpak-spawn --host` wouldn't work anyway).
+    # This is the only path that works for ferry running inside an
+    # ES-DE launch wrapper: RetroDECK ES-DE → sandboxed shell → ferry.
+    if _running_in_retrodeck_sandbox(flatpak_info_path):
+        return DolphinTool(
+            source="retrodeck-in-sandbox",
+            label=f"in-sandbox {_RETRODECK_TOOL_PATH}",
+            argv_prefix=(
+                "sh",
+                "-c",
+                _RETRODECK_SHELL,
+                "_",  # placeholder for $0
+            ),
+        )
 
     if _flatpak_app_installed(_RETRODECK_APP_ID, flatpak_dirs):
         return DolphinTool(
@@ -217,6 +243,27 @@ def discover_dolphin_tool(
 def _flatpak_app_installed(app_id: str, flatpak_dirs: tuple[Path, ...]) -> bool:
     """True iff `app_id` is installed in any of the given flatpak install roots."""
     return any((root / app_id).is_dir() for root in flatpak_dirs)
+
+
+def _running_in_retrodeck_sandbox(flatpak_info_path: Path) -> bool:
+    """True iff we're running inside the RetroDECK flatpak's sandbox.
+
+    Flatpak sandboxes always have `/.flatpak-info` containing INI-style
+    metadata including `name=<app-id>`. Outside a sandbox the file
+    doesn't exist. Used to detect ES-DE-via-launch-wrapper invocations
+    where ferry runs inside RetroDECK and can call dolphin-tool
+    directly via `/app/...` paths instead of going through `flatpak run`
+    (which can't escape back to the sandbox we're already in).
+    """
+    if not flatpak_info_path.is_file():
+        return False
+    try:
+        text = flatpak_info_path.read_text()
+    except OSError:
+        return False
+    # Robust against [Application] section vs flat layout — we just need
+    # to see this app's name appear as a key=value somewhere.
+    return f"name={_RETRODECK_APP_ID}" in text
 
 
 # ---------------------------------------------------------------------------
