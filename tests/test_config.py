@@ -555,6 +555,7 @@ def test_empty_saves_section_defaults_to_enabled(tmp_path: Path) -> None:
     assert loaded.config.saves is not None
     assert loaded.config.saves.enabled is True
     assert loaded.config.saves.retroarch_install is None
+    assert loaded.config.saves.dolphin_install is None
 
 
 def test_saves_enabled_explicit_false(tmp_path: Path) -> None:
@@ -584,6 +585,26 @@ def test_saves_retroarch_install_rejects_unknown_value(tmp_path: Path) -> None:
         minimal_toml() + '\n[saves]\nretroarch_install = "esx"\n',
     )
     with pytest.raises(ConfigInvalidError, match="retroarch_install"):
+        load_config(cfg_file, env={})
+
+
+def test_saves_dolphin_install_accepts_known_values(tmp_path: Path) -> None:
+    for value in ("retrodeck-flatpak", "emudeck-flatpak", "native"):
+        cfg_file = write(
+            tmp_path / "config.toml",
+            minimal_toml() + f'\n[saves]\ndolphin_install = "{value}"\n',
+        )
+        loaded = load_config(cfg_file, env={})
+        assert loaded.config.saves is not None
+        assert loaded.config.saves.dolphin_install == value
+
+
+def test_saves_dolphin_install_rejects_unknown_value(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[saves]\ndolphin_install = "libretro-flatpak"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="dolphin_install"):
         load_config(cfg_file, env={})
 
 

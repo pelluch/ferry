@@ -321,3 +321,137 @@ def test_status_picks_install_with_active_saves_when_other_is_empty(
     assert "retroarch:   native" in result.output
     assert "out of 2 detected" in result.output
     assert "AMBIGUOUS" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Dolphin install discovery in status (v3)
+# ---------------------------------------------------------------------------
+
+
+_RD_DOLPHIN_SAVES = "retrodeck/saves/gc/dolphin"
+_RD_DOLPHIN_CONFIG = ".var/app/net.retrodeck.retrodeck/config/dolphin-emu/Dolphin.ini"
+_NATIVE_DOLPHIN_SAVES = ".local/share/dolphin-emu/GC"
+_NATIVE_DOLPHIN_CONFIG = ".local/share/dolphin-emu/Config/Dolphin.ini"
+
+
+def _setup_dolphin(
+    home: Path,
+    saves_rel: str,
+    config_rel: str,
+    *,
+    ini_body: str = "",
+    region: str | None = None,
+) -> Path:
+    """Set up a Dolphin install: create saves_root and write Dolphin.ini.
+    If `region` is given, plant a `.gci` under `<saves_root>/<region>/Card A/`."""
+    saves_root = home / saves_rel
+    saves_root.mkdir(parents=True, exist_ok=True)
+    config_path = home / config_rel
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(ini_body)
+    if region is not None:
+        card = saves_root / region / "Card A"
+        card.mkdir(parents=True, exist_ok=True)
+        (card / "01-GM8E-Test.gci").write_bytes(b"x" * 8256)
+    return saves_root
+
+
+def test_status_reports_no_dolphin_when_absent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "dolphin:     (not detected)" in result.output
+
+
+def test_status_reports_retrodeck_dolphin_in_gci_folder_mode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    saves = _setup_dolphin(
+        tmp_path,
+        _RD_DOLPHIN_SAVES,
+        _RD_DOLPHIN_CONFIG,
+        ini_body="[Core]\nSlotA = 8\n",
+    )
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "dolphin:     retrodeck-flatpak" in result.output
+    assert str(saves) in result.output
+    assert "gci_folder" in result.output
+
+
+def test_status_warns_when_dolphin_in_raw_memcard_mode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _setup_dolphin(
+        tmp_path,
+        _NATIVE_DOLPHIN_SAVES,
+        _NATIVE_DOLPHIN_CONFIG,
+        ini_body="[Core]\nSlotA = 1\n",
+    )
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "dolphin:     native" in result.output
+    assert "RAW MEMCARD MODE" in result.output
+
+
+def test_status_flags_dolphin_ambiguity_when_multiple_installs_have_saves(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _setup_dolphin(
+        tmp_path,
+        _RD_DOLPHIN_SAVES,
+        _RD_DOLPHIN_CONFIG,
+        ini_body="[Core]\nSlotA = 8\n",
+        region="US",  # RetroDECK uses 2-letter regions
+    )
+    _setup_dolphin(
+        tmp_path,
+        _NATIVE_DOLPHIN_SAVES,
+        _NATIVE_DOLPHIN_CONFIG,
+        ini_body="[Core]\nSlotA = 8\n",
+        region="USA",  # native uses 3-letter
+    )
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "dolphin:     AMBIGUOUS" in result.output
+    assert "[saves.dolphin_install]" in result.output
+
+
+def test_status_honors_configured_dolphin_install(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _setup_dolphin(
+        tmp_path,
+        _RD_DOLPHIN_SAVES,
+        _RD_DOLPHIN_CONFIG,
+        ini_body="[Core]\nSlotA = 8\n",
+        region="US",
+    )
+    _setup_dolphin(
+        tmp_path,
+        _NATIVE_DOLPHIN_SAVES,
+        _NATIVE_DOLPHIN_CONFIG,
+        ini_body="[Core]\nSlotA = 8\n",
+    )
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[romm]\nurl = "{BASE_URL}"\napi_key = "rmm_abcdef0123456789"\n'
+        '[destination]\npreset = "esde-native"\n'
+        '[sync]\ncollections = ["Steam Deck"]\n'
+        '[saves]\ndolphin_install = "native"\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "dolphin:     native" in result.output
+    assert "selected via [saves].dolphin_install" in result.output

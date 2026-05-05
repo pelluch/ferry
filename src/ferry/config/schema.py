@@ -57,20 +57,22 @@ def _empty_transforms() -> TransformsConfig:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SavesConfig:
-    """Settings for save sync (DESIGN.md §5.3, v2).
+    """Settings for save sync (DESIGN.md §5.3, v2+v3).
 
     Presence of `[saves]` in config opts the user into save sync; the
     default `enabled = true` lets the section act as the on switch
     without requiring a redundant assignment. Set `enabled = false` to
     keep the section configured but pause the feature.
 
-    `retroarch_install` disambiguates when ferry detects multiple
-    RetroArch installations with active saves. Single-install case
-    leaves it None and discovery picks automatically.
+    `retroarch_install` / `dolphin_install` disambiguate when ferry
+    detects multiple installations of the same emulator with active
+    saves. Single-install cases leave them None and discovery picks
+    automatically.
     """
 
     enabled: bool = True
     retroarch_install: str | None = None
+    dolphin_install: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

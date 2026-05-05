@@ -26,8 +26,9 @@ _SYNC_KEYS = frozenset(
     }
 )
 _TRANSFORMS_PLATFORM_KEYS = frozenset({"pipeline"})
-_SAVES_KEYS = frozenset({"enabled", "retroarch_install"})
+_SAVES_KEYS = frozenset({"enabled", "retroarch_install", "dolphin_install"})
 _RETROARCH_INSTALL_VALUES = frozenset({"retrodeck-flatpak", "libretro-flatpak", "native"})
+_DOLPHIN_INSTALL_VALUES = frozenset({"retrodeck-flatpak", "emudeck-flatpak", "native"})
 
 
 class ApiKeySource(enum.StrEnum):
@@ -162,7 +163,19 @@ def _parse_saves(raw: dict, path: Path) -> SavesConfig | None:
                 f"[saves].retroarch_install in {path} must be one of: {allowed}"
             )
 
-    return SavesConfig(enabled=enabled, retroarch_install=retroarch_install)
+    dolphin_install = section.get("dolphin_install")
+    if dolphin_install is not None:
+        if not isinstance(dolphin_install, str):
+            raise ConfigInvalidError(f"[saves].dolphin_install must be a string in {path}")
+        if dolphin_install not in _DOLPHIN_INSTALL_VALUES:
+            allowed = ", ".join(sorted(_DOLPHIN_INSTALL_VALUES))
+            raise ConfigInvalidError(f"[saves].dolphin_install in {path} must be one of: {allowed}")
+
+    return SavesConfig(
+        enabled=enabled,
+        retroarch_install=retroarch_install,
+        dolphin_install=dolphin_install,
+    )
 
 
 def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:

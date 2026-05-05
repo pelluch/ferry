@@ -15,6 +15,13 @@ from pathlib import Path
 import click
 
 from ferry import __version__
+from ferry.adapters.dolphin_paths import (
+    DolphinInstall,
+    discover_dolphin_installs,
+)
+from ferry.adapters.dolphin_paths import (
+    select_active_install as select_active_dolphin,
+)
 from ferry.adapters.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
@@ -81,6 +88,7 @@ def status(ctx: click.Context) -> None:
     click.echo("")
     click.echo("[saves]")
     _print_retroarch_status(config)
+    _print_dolphin_status(config)
 
     if state.roms and config.destination is not None:
         _print_reconcile(state, config)
@@ -148,6 +156,58 @@ def _layout_label(install: RetroArchInstall) -> str:
     if install.sort_savefiles_enable:
         flags.append("by-core")
     return ", ".join(flags) if flags else "flat"
+
+
+def _print_dolphin_status(config: Config) -> None:
+    """One-line Dolphin install summary; warns when SlotA isn't GCI Folder.
+
+    v3 only syncs Dolphin saves when SlotA is in GCI Folder mode (the
+    modern Dolphin default). Raw `.raw` memcards aren't supported in
+    v3 — surface clearly so the user knows what to do.
+    """
+    installs = discover_dolphin_installs()
+    if not installs:
+        click.echo("  dolphin:     (not detected)")
+        return
+
+    configured_choice = config.saves.dolphin_install if config.saves else None
+    if configured_choice is not None:
+        match = next((i for i in installs if i.source == configured_choice), None)
+        if match is not None:
+            _print_dolphin_install_line(match, indent="  dolphin:     ")
+            click.echo(f"    (selected via [saves].dolphin_install = {configured_choice!r})")
+            return
+        click.echo(
+            f"  warning: [saves].dolphin_install = {configured_choice!r} "
+            "but no discovered install matches; auto-selecting:"
+        )
+
+    active = select_active_dolphin(installs)
+    if active is None:
+        click.echo("  dolphin:     AMBIGUOUS — multiple active installs detected:")
+        for install in installs:
+            _print_dolphin_install_line(install, indent="    ")
+        click.echo("    (set [saves.dolphin_install] in config to pick one)")
+        return
+
+    _print_dolphin_install_line(active, indent="  dolphin:     ")
+    if len(installs) > 1:
+        click.echo(
+            f"    (out of {len(installs)} detected; selected because "
+            f"{'has active saves' if active.has_saves else 'priority order'})"
+        )
+
+
+def _print_dolphin_install_line(install: DolphinInstall, *, indent: str) -> None:
+    mode = install.slot_a_mode
+    suffix = ""
+    if mode == "raw_memcard":
+        suffix = " — RAW MEMCARD MODE (v3 needs GCI Folder; switch in Dolphin Config > GameCube)"
+    elif mode == "none":
+        suffix = " — Slot A disabled"
+    elif mode == "other":
+        suffix = " — Slot A is an unsupported device type"
+    click.echo(f"{indent}{install.source} @ {install.saves_root} ({mode}){suffix}")
 
 
 def _print_reconcile(state: LibraryState, config: Config) -> None:
