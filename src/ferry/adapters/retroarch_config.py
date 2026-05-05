@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 _SAVEFILE_DIRECTORY_KEY = "savefile_directory"
 _SORT_BY_CORE_KEY = "sort_savefiles_enable"
 _SORT_BY_CONTENT_KEY = "sort_savefiles_by_content_enable"
+_LIBRETRO_DIRECTORY_KEY = "libretro_directory"
+_LIBRETRO_INFO_PATH_KEY = "libretro_info_path"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -44,12 +46,20 @@ class RetroArchSaveSettings:
     `savefile_directory` is left as `None` when the cfg doesn't override it
     (or sets it to empty) — the caller falls back to RetroArch's own default
     (`<config_dir>/saves/`) in that case.
+
+    `libretro_directory` (.so files) and `libretro_info_path` (.info
+    metadata) are RetroArch's pointers to its cores tree. On Arch they
+    live separately (`/usr/lib/libretro` + `/usr/share/libretro/info`); in
+    flatpak installs they point inside the sandbox (`/app/...`) and need
+    host-path translation that the RetroArchInstall layer handles.
     """
 
     cfg_path: Path
     savefile_directory: Path | None
     sort_savefiles_enable: bool
     sort_savefiles_by_content_enable: bool
+    libretro_directory: Path | None
+    libretro_info_path: Path | None
 
 
 def parse_retroarch_cfg(
@@ -75,6 +85,8 @@ def parse_retroarch_cfg(
     savefile_dir: Path | None = None
     sort_by_core = False
     sort_by_content = False
+    libretro_dir: Path | None = None
+    libretro_info: Path | None = None
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -90,12 +102,18 @@ def parse_retroarch_cfg(
             sort_by_core = value.lower() == "true"
         elif key == _SORT_BY_CONTENT_KEY:
             sort_by_content = value.lower() == "true"
+        elif key == _LIBRETRO_DIRECTORY_KEY and value and value != "default":
+            libretro_dir = _expand_path(value, home)
+        elif key == _LIBRETRO_INFO_PATH_KEY and value and value != "default":
+            libretro_info = _expand_path(value, home)
 
     return RetroArchSaveSettings(
         cfg_path=cfg_path,
         savefile_directory=savefile_dir,
         sort_savefiles_enable=sort_by_core,
         sort_savefiles_by_content_enable=sort_by_content,
+        libretro_directory=libretro_dir,
+        libretro_info_path=libretro_info,
     )
 
 

@@ -501,7 +501,7 @@ def test_delete_action_moves_outputs_and_sidecar_to_trash(tmp_path: Path, make_r
     # Files are in the trash, with the gc/ subdir preserved.
     trash_dir = result.deleted[0].trash_dir
     assert (trash_dir / "gc" / "Pikmin.iso").read_bytes() == b"iso-bytes"
-    assert (trash_dir / "gc" / "Pikmin.iso.ferry.json").exists()
+    assert (trash_dir / "gc" / ".Pikmin.iso.ferry.json").exists()
 
     # State no longer mentions the rom.
     from ferry.adapters.state_store import load_state

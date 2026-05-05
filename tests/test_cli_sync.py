@@ -807,6 +807,51 @@ def test_sync_runs_save_sync_after_library_sync(tmp_path: Path, monkeypatch) -> 
     assert "Downloaded: 0" in result.output
 
 
+@respx.mock
+def test_dry_run_shows_save_sync_preview(tmp_path: Path, monkeypatch) -> None:
+    """--dry-run reports which RA install save sync would target — no HTTP calls
+    to /api/saves or /api/devices."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    roms_base = tmp_path / "roms"
+    cfg = write_config_with_saves(tmp_path / "config.toml", roms_base=roms_base)
+    _plant_native_ra(tmp_path)
+
+    mock_endpoints(collections=[{"id": 1, "name": "Steam Deck"}], rom_items=[])
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Save sync: would target native" in result.output
+
+
+@respx.mock
+def test_dry_run_save_preview_reports_skip_when_no_install(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    roms_base = tmp_path / "roms"
+    cfg = write_config_with_saves(tmp_path / "config.toml", roms_base=roms_base)
+    # No RA install planted.
+
+    mock_endpoints(collections=[{"id": 1, "name": "Steam Deck"}], rom_items=[])
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Save sync: would skip" in result.output
+    assert "no RetroArch" in result.output
+
+
+@respx.mock
+def test_dry_run_save_preview_reports_disabled(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    roms_base = tmp_path / "roms"
+    cfg = write_config_with_saves(tmp_path / "config.toml", roms_base=roms_base, enabled=False)
+    _plant_native_ra(tmp_path)
+
+    mock_endpoints(collections=[{"id": 1, "name": "Steam Deck"}], rom_items=[])
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Save sync: disabled" in result.output
+
+
 def test_dry_run_skips_save_sync(tmp_path: Path, monkeypatch) -> None:
     """--dry-run never touches saves — even with [saves] enabled."""
     monkeypatch.setenv("HOME", str(tmp_path))

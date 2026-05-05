@@ -40,8 +40,9 @@ this is a single concrete class. (DESIGN.md §5.3.)
 from __future__ import annotations
 
 import logging
+import os
+import re
 import socket
-import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -49,6 +50,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ferry import __version__
+from ferry.adapters.retroarch_core_info import CoreInfoIndex
 from ferry.adapters.retroarch_paths import RetroArchInstall
 from ferry.adapters.retroarch_saves import LocalSave, list_local_saves
 from ferry.adapters.romm import RommApi, RommApiError
@@ -66,6 +68,24 @@ _DEFAULT_SLOT = "default"
 
 # Action labels emitted internally for clarity.
 _Action = Literal["upload", "download", "skip", "ambiguous", "drop_prior"]
+
+# Matches the suffix RomM appends to save filenames on every upload — the
+# `_apply_datetime_tag` logic in `backend/endpoints/saves.py`. We strip it
+# both from downloads (so RetroArch finds the file at the expected
+# `<rom-stem>.srm` path) and from SaveRecord.save_filename (which represents
+# what's on disk locally, not what the server stores).
+_DATETIME_TAG_PATTERN = re.compile(r" \[\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\]")
+
+
+def _strip_datetime_tag(filename: str) -> str:
+    """Strip RomM's ` [YYYY-MM-DD_HH-MM-SS]` tag from a save filename.
+
+    `Mario [2026-04-24_15-51-34].srm` → `Mario.srm`. RetroArch writes saves
+    using the ROM's plain basename; the timestamp is RomM's history-keeping,
+    invisible at the filesystem level.
+    """
+    name, ext = os.path.splitext(filename)
+    return _DATETIME_TAG_PATTERN.sub("", name) + ext
 
 
 @dataclass(slots=True, kw_only=True)
@@ -160,6 +180,7 @@ class RetroArchSaveBackend:
         self._api = api
         self._device_id = device_id
         self._logger = log or logger
+        self._core_info = CoreInfoIndex(install)
 
     def delete_for_rom(self, rom: RomState, trash_dir: Path) -> tuple[int, list[str]]:
         """Move every local save file for *rom* into the rom's trash dir.
@@ -204,7 +225,9 @@ class RetroArchSaveBackend:
 
     def sync(self, state: LibraryState) -> SaveSyncResult:
         """Run a full save-sync pass against `state.roms`."""
-        local_saves, walker_warnings = list_local_saves(self._install, state.roms.values())
+        local_saves, walker_warnings = list_local_saves(
+            self._install, state.roms.values(), core_info=self._core_info
+        )
 
         try:
             server_saves = self._api.list_saves(device_id=self._device_id)
@@ -403,44 +426,50 @@ class RetroArchSaveBackend:
         result: SaveSyncResult,
     ) -> SaveRecord | None:
         save_id = server.get("id")
-        save_filename = server.get("file_name")
-        if not isinstance(save_id, int) or not isinstance(save_filename, str):
+        server_filename = server.get("file_name")
+        if not isinstance(save_id, int) or not isinstance(server_filename, str):
             result.failed.append(
                 f"download {rom.name} (rom_id={rom.rom_id}, {emulator}/{slot}): "
                 f"server response missing id or file_name"
             )
             return None
 
-        dest = _resolve_local_path_for(self._install, rom, emulator, save_filename)
+        # Strip RomM's `[YYYY-MM-DD_HH-MM-SS]` tag from the filename — the
+        # local file must match `<rom-stem>.srm` for RetroArch to load it.
+        local_filename = _strip_datetime_tag(server_filename)
+        dest = _resolve_local_path_for(
+            self._install, rom, emulator, local_filename, self._core_info
+        )
         if dest is None:
             result.failed.append(
-                f"download {rom.name} ({save_filename}): cannot determine local path "
+                f"download {rom.name} ({local_filename}): cannot determine local path "
                 f"(emulator={emulator!r}; check sort_savefiles_* settings)"
             )
             return None
 
+        # Download directly to dest. `RommHttpAdapter.download` already uses
+        # a `<dest>.part` sibling for atomic placement — no tempfile needed,
+        # which sidesteps the cross-device-link issue when /tmp is a
+        # different filesystem from the saves dir.
         try:
-            with tempfile.TemporaryDirectory(prefix="ferry-save-") as tmp:
-                tmp_dest = Path(tmp) / save_filename
-                download = self._api.download_save(
-                    save_id,
-                    tmp_dest,
-                    device_id=self._device_id,
-                )
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp_dest.replace(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            download = self._api.download_save(
+                save_id,
+                dest,
+                device_id=self._device_id,
+            )
         except RommApiError as exc:
-            result.failed.append(f"download {rom.name} ({save_filename}): {exc}")
+            result.failed.append(f"download {rom.name} ({local_filename}): {exc}")
             return None
         except OSError as exc:
-            result.failed.append(f"download {rom.name} ({save_filename}): {exc}")
+            result.failed.append(f"download {rom.name} ({local_filename}): {exc}")
             return None
 
         result.downloaded += 1
         return SaveRecord(
             emulator=emulator,
             slot=slot,
-            save_filename=save_filename,
+            save_filename=local_filename,
             last_sync_md5=download.md5,
             last_sync_server_size=server.get("file_size_bytes") or download.size,
             last_sync_server_updated_at=server.get("updated_at") or "",
@@ -508,6 +537,11 @@ def _save_record_from_server(server: dict[str, Any], *, local_md5: str) -> SaveR
     Uses the locally computed MD5 as the last-sync hash — the bytes we
     just wrote upstream. Server hash is also available but the local
     one is the canonical "what did we send" signal.
+
+    The server's `file_name` carries RomM's `[YYYY-MM-DD_HH-MM-SS]` tag;
+    `SaveRecord.save_filename` represents the LOCAL filename (no tag),
+    so we strip the tag here. Tests against the local path on disk on
+    next sync use this value, not the server's tagged form.
     """
     save_id = server.get("id")
     file_name = server.get("file_name") or ""
@@ -525,7 +559,7 @@ def _save_record_from_server(server: dict[str, Any], *, local_md5: str) -> SaveR
     return SaveRecord(
         emulator=emulator,
         slot=slot,
-        save_filename=file_name,
+        save_filename=_strip_datetime_tag(file_name),
         last_sync_md5=local_md5,
         last_sync_server_size=file_size,
         last_sync_server_updated_at=updated_at,
@@ -539,6 +573,7 @@ def _resolve_local_path_for(
     rom: RomState,
     emulator: str,
     save_filename: str,
+    core_info: CoreInfoIndex | None = None,
 ) -> Path | None:
     """Mirror of the walker's emulator-from-layout in reverse.
 
@@ -546,22 +581,30 @@ def _resolve_local_path_for(
     install's sort_* settings + the save's emulator label. Returns None
     when we lack the information (e.g., sort_by_core=true but emulator
     label is plain `retroarch` so we don't know which core subdir).
+
+    `core_info` resolves the lowercase `core_so_prefix` (e.g., `snes9x`)
+    from the emulator label to RetroArch's actual `corename` directory
+    (e.g., `Snes9x`) — without this, the resolved path's casing won't
+    match what RetroArch creates and saves end up in parallel dirs.
+    Identity fallback when the index isn't available or the core isn't
+    known.
     """
     base = install.savefile_directory
     sort_by_core = install.sort_savefiles_enable
     sort_by_content = install.sort_savefiles_by_content_enable
-    core: str | None = None
+    core_prefix: str | None = None
     if emulator.startswith("retroarch-"):
-        core = emulator[len("retroarch-") :]
+        core_prefix = emulator[len("retroarch-") :]
+    core_dir = core_info.forward(core_prefix) if (core_prefix and core_info) else core_prefix
 
     if sort_by_core and sort_by_content:
-        if core is None:
+        if core_dir is None:
             return None
-        return base / rom.platform_slug / core / save_filename
+        return base / rom.platform_slug / core_dir / save_filename
     if sort_by_core and not sort_by_content:
-        if core is None:
+        if core_dir is None:
             return None
-        return base / core / save_filename
+        return base / core_dir / save_filename
     if sort_by_content and not sort_by_core:
         return base / rom.platform_slug / save_filename
     return base / save_filename

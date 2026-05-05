@@ -5,6 +5,7 @@ import pytest
 from ferry.adapters.sidecar import (
     SIDECAR_SUFFIX,
     find_sidecars,
+    legacy_sidecar_path_for,
     read_sidecar,
     sidecar_path_for,
     write_sidecar,
@@ -12,9 +13,17 @@ from ferry.adapters.sidecar import (
 from ferry.domain.state import StateDecodeError
 
 
-def test_sidecar_path_appends_suffix(tmp_path: Path) -> None:
+def test_sidecar_path_is_dot_prefixed(tmp_path: Path) -> None:
+    """Canonical sidecar is hidden via leading-dot — keeps it out of ES-DE
+    / RetroDECK frontends that match `.json` as a valid ROM extension."""
     primary = tmp_path / "gc" / "Pikmin.iso"
-    assert sidecar_path_for(primary) == tmp_path / "gc" / f"Pikmin.iso{SIDECAR_SUFFIX}"
+    assert sidecar_path_for(primary) == tmp_path / "gc" / f".Pikmin.iso{SIDECAR_SUFFIX}"
+
+
+def test_legacy_sidecar_path_is_not_dot_prefixed(tmp_path: Path) -> None:
+    """Legacy path remains accessible for migration."""
+    primary = tmp_path / "gc" / "Pikmin.iso"
+    assert legacy_sidecar_path_for(primary) == tmp_path / "gc" / f"Pikmin.iso{SIDECAR_SUFFIX}"
 
 
 def test_write_creates_parent_dirs_and_returns_path(tmp_path: Path, make_rom) -> None:
@@ -112,3 +121,74 @@ def test_find_sidecars_skips_files_with_sidecar_in_middle(tmp_path: Path, make_r
     (tmp_path / "gc" / "decoy.ferry.json.bak").write_text("{}")
     found = find_sidecars([tmp_path])
     assert found == [sidecar_path_for(primary)]
+
+
+# ---------------------------------------------------------------------------
+# Legacy migration: dot-prefix backward-compat
+# ---------------------------------------------------------------------------
+
+
+def test_read_falls_back_to_legacy_path(tmp_path: Path, make_rom) -> None:
+    """Pre-migration sidecars (no leading dot) still read."""
+    primary = tmp_path / "gc" / "Pikmin.iso"
+    primary.parent.mkdir(parents=True)
+    rom = make_rom()
+    # Write directly to the legacy location, NOT via write_sidecar (which
+    # would write to the canonical location).
+    legacy = legacy_sidecar_path_for(primary)
+    from ferry.domain.state import rom_to_json
+
+    legacy.write_text(rom_to_json(rom))
+    assert read_sidecar(primary) == rom
+
+
+def test_canonical_takes_precedence_over_legacy(tmp_path: Path, make_rom) -> None:
+    """If both files exist, the canonical (dot-prefixed) one wins."""
+    from ferry.domain.state import rom_to_json
+
+    primary = tmp_path / "gc" / "Pikmin.iso"
+    primary.parent.mkdir(parents=True)
+    canonical_rom = make_rom(rom_id=1, name="Canonical")
+    legacy_rom = make_rom(rom_id=2, name="Legacy")
+    sidecar_path_for(primary).write_text(rom_to_json(canonical_rom))
+    legacy_sidecar_path_for(primary).write_text(rom_to_json(legacy_rom))
+    result = read_sidecar(primary)
+    assert result is not None
+    assert result.rom_id == 1
+    assert result.name == "Canonical"
+
+
+def test_write_removes_legacy_sidecar(tmp_path: Path, make_rom) -> None:
+    """On write, the legacy non-prefixed file is cleaned up — silent migration."""
+    from ferry.domain.state import rom_to_json
+
+    primary = tmp_path / "gc" / "Pikmin.iso"
+    primary.parent.mkdir(parents=True)
+    legacy = legacy_sidecar_path_for(primary)
+    legacy.write_text(rom_to_json(make_rom(rom_id=99)))
+    assert legacy.exists()
+
+    write_sidecar(primary, make_rom(rom_id=1))
+    canonical = sidecar_path_for(primary)
+    assert canonical.exists()
+    assert not legacy.exists()  # migrated away
+
+
+def test_find_sidecars_returns_both_styles(tmp_path: Path, make_rom) -> None:
+    """During migration, find_sidecars must surface both old and new files."""
+    from ferry.domain.state import rom_to_json
+
+    a = tmp_path / "gc" / "Pikmin.iso"
+    b = tmp_path / "ps2" / "GoW.iso"
+    a.parent.mkdir(parents=True)
+    b.parent.mkdir(parents=True)
+    # `a` has the canonical (dot-prefixed) sidecar
+    sidecar_path_for(a).write_text(rom_to_json(make_rom(rom_id=1)))
+    # `b` still has the legacy sidecar — would happen for ROMs not yet
+    # touched by a write under the new convention.
+    legacy_sidecar_path_for(b).write_text(rom_to_json(make_rom(rom_id=2)))
+
+    found = find_sidecars([tmp_path])
+    assert sidecar_path_for(a) in found
+    assert legacy_sidecar_path_for(b) in found
+    assert len(found) == 2

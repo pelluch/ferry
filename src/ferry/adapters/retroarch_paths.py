@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ferry.adapters.retroarch_config import parse_retroarch_cfg
+from ferry.adapters.retroarch_config import RetroArchSaveSettings, parse_retroarch_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,12 @@ class RetroArchInstall:
     `has_saves` is True iff any file currently lives under
     `savefile_directory`. Used by the selector to disambiguate between
     multiple installs.
+
+    `core_info_candidates` is an ordered list of host-readable paths where
+    this install's `*.info` core metadata files might live. Probed in
+    order; first match wins. Includes flatpak-sandbox-path translations
+    for RetroDECK and libretro-flatpak (the cfg's path points inside the
+    sandbox and isn't directly readable from the host).
     """
 
     source: RetroArchSource
@@ -51,6 +57,9 @@ class RetroArchInstall:
     sort_savefiles_enable: bool
     sort_savefiles_by_content_enable: bool
     has_saves: bool
+    # Default empty tuple — older tests build RetroArchInstall manually and
+    # don't care about core_info; live discovery always populates this.
+    core_info_candidates: tuple[Path, ...] = ()
 
 
 # (source, config_root_relative_to_home). Order is preference — RetroDECK
@@ -79,6 +88,7 @@ def discover_retroarch_installs(home: Path | None = None) -> list[RetroArchInsta
         if settings is None:
             continue
         savefile_dir = settings.savefile_directory or (config_root / "saves")
+        info_candidates = _core_info_candidates(source, settings, home)
         installs.append(
             RetroArchInstall(
                 source=source,
@@ -88,9 +98,69 @@ def discover_retroarch_installs(home: Path | None = None) -> list[RetroArchInsta
                 sort_savefiles_enable=settings.sort_savefiles_enable,
                 sort_savefiles_by_content_enable=settings.sort_savefiles_by_content_enable,
                 has_saves=_dir_has_save_files(savefile_dir),
+                core_info_candidates=info_candidates,
             )
         )
     return installs
+
+
+def _core_info_candidates(
+    source: RetroArchSource,
+    settings: RetroArchSaveSettings,
+    home: Path,
+) -> tuple[Path, ...]:
+    """Per-flavor list of plausible host paths where `*.info` core files live.
+
+    `RetroArchInstall.core_info_candidates` is probed in order at lookup
+    time; first existing dir wins. Flatpak installs have their cfg's
+    `libretro_info_path` pointing inside the sandbox (`/app/...`), so
+    raw values are useless without translation — we hardcode the host-side
+    sandbox paths instead.
+    """
+    candidates: list[Path] = []
+    if source == "retrodeck-flatpak":
+        # RetroDECK bundles its RA inside the flatpak; .info files live at
+        # the flatpak's mounted user/system data path.
+        candidates.append(
+            home
+            / ".local/share/flatpak/app/net.retrodeck.retrodeck"
+            / "current/active/files/retrodeck/components/retroarch/rd_extras/cores"
+        )
+        candidates.append(
+            Path(
+                "/var/lib/flatpak/app/net.retrodeck.retrodeck"
+                "/current/active/files/retrodeck/components/retroarch/rd_extras/cores"
+            )
+        )
+    elif source == "libretro-flatpak":
+        candidates.append(
+            home
+            / ".local/share/flatpak/app/org.libretro.RetroArch"
+            / "current/active/files/lib/libretro"
+        )
+        candidates.append(
+            Path("/var/lib/flatpak/app/org.libretro.RetroArch/current/active/files/lib/libretro")
+        )
+        # User-installed cores live next to the cfg.
+        candidates.append(home / ".var/app/org.libretro.RetroArch/config/retroarch/cores")
+    else:  # native
+        # Cfg path is authoritative when present and readable.
+        if settings.libretro_info_path is not None:
+            candidates.append(settings.libretro_info_path)
+        if settings.libretro_directory is not None:
+            candidates.append(settings.libretro_directory)
+        # Conventional fallbacks — different distros place files differently.
+        candidates.append(Path("/usr/share/libretro/info"))
+        candidates.append(Path("/usr/lib/libretro"))
+        candidates.append(home / ".config/retroarch/cores")
+    # De-dup while preserving order.
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return tuple(unique)
 
 
 def select_active_install(installs: list[RetroArchInstall]) -> RetroArchInstall | None:

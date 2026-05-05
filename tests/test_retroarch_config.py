@@ -30,6 +30,8 @@ def test_empty_cfg_returns_settings_with_defaults(tmp_path: Path) -> None:
         savefile_directory=None,
         sort_savefiles_enable=False,
         sort_savefiles_by_content_enable=False,
+        libretro_directory=None,
+        libretro_info_path=None,
     )
 
 

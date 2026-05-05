@@ -243,6 +243,58 @@ def test_status_flags_ambiguity_when_multiple_installs_have_saves(
     assert "[saves.retroarch_install]" in result.output
 
 
+def test_status_honors_configured_retroarch_install(tmp_path: Path, monkeypatch) -> None:
+    """`[saves].retroarch_install` overrides auto-selection in status output."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Plant both: RetroDECK with active saves, native without.
+    rd_saves = tmp_path / "retrodeck/saves"
+    rd_saves.mkdir(parents=True)
+    (rd_saves / "Mario.srm").write_bytes(b"x")
+    _write_ra_cfg(
+        tmp_path,
+        ".var/app/net.retrodeck.retrodeck/config/retroarch",
+        f'savefile_directory = "{rd_saves}"\n',
+    )
+    native_saves = tmp_path / ".config/retroarch/saves"
+    native_saves.mkdir(parents=True)
+    _write_ra_cfg(tmp_path, ".config/retroarch", "")
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[romm]\nurl = "{BASE_URL}"\napi_key = "rmm_abcdef0123456789"\n'
+        '[destination]\npreset = "esde-native"\n'
+        '[sync]\ncollections = ["Steam Deck"]\n'
+        '[saves]\nretroarch_install = "native"\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "retroarch:   native" in result.output
+    assert "selected via [saves].retroarch_install" in result.output
+    assert "AMBIGUOUS" not in result.output
+
+
+def test_status_warns_on_configured_install_mismatch(tmp_path: Path, monkeypatch) -> None:
+    """Configured value present but no install matches → warn + fall back."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_ra_cfg(tmp_path, ".config/retroarch", "")  # only native
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[romm]\nurl = "{BASE_URL}"\napi_key = "rmm_abcdef0123456789"\n'
+        '[destination]\npreset = "esde-native"\n'
+        '[sync]\ncollections = ["Steam Deck"]\n'
+        '[saves]\nretroarch_install = "retrodeck-flatpak"\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "warning" in result.output
+    assert "no discovered install matches" in result.output
+    # Falls back to auto-selection, which finds native.
+    assert "retroarch:   native" in result.output
+
+
 def test_status_picks_install_with_active_saves_when_other_is_empty(
     tmp_path: Path, monkeypatch
 ) -> None:

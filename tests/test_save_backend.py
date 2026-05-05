@@ -540,6 +540,161 @@ def test_upload_failure_records_in_result(tmp_path: Path) -> None:
 
 
 @respx.mock
+def test_download_strips_romm_datetime_tag_from_filename(tmp_path: Path) -> None:
+    """RomM appends `[YYYY-MM-DD_HH-MM-SS]` on every upload; the local file
+    must NOT carry that tag — RetroArch loads `<rom-stem>.srm`, not
+    `<rom-stem> [TIMESTAMP].srm`. Verified against the actual filename pattern
+    we observed on the user's RomM in live testing."""
+    saves_dir = tmp_path / "saves"
+    install = _make_install(saves_dir, sort_by_core=True)
+    rom = _make_rom(rom_id=1, source_filename="Mario.zip")
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                _server_save(
+                    save_id=42,
+                    rom_id=1,
+                    file_name="Mario [2026-04-24_15-51-34].srm",
+                    md5=_md5(b"data"),
+                    file_size=len(b"data"),
+                )
+            ],
+        )
+    )
+    respx.get(f"{BASE_URL}/api/saves/42/content").mock(
+        return_value=httpx.Response(200, content=b"data")
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1
+    # File on disk has the stripped name — RetroArch will find it.
+    expected = saves_dir / "snes9x" / "Mario.srm"
+    assert expected.exists()
+    assert expected.read_bytes() == b"data"
+    # And the tagged filename is NOT present.
+    assert not (saves_dir / "snes9x" / "Mario [2026-04-24_15-51-34].srm").exists()
+    # SaveRecord stores the local (stripped) filename for next-sync matching.
+    assert result.updated_roms[1].saves[0].save_filename == "Mario.srm"
+
+
+@respx.mock
+def test_upload_response_record_strips_datetime_tag(tmp_path: Path) -> None:
+    """Post-upload SaveRecord.save_filename must reflect what's on disk
+    locally (no tag), even though the server returned the tagged filename."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    (saves_dir / "snes9x" / "Mario.srm").write_bytes(b"data")
+    install = _make_install(saves_dir)
+    rom = _make_rom(rom_id=1, source_filename="Mario.zip")
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=_server_save(
+                save_id=10,
+                rom_id=1,
+                file_name="Mario [2026-04-25_12-00-00].srm",  # server returns tagged
+            ),
+        )
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert result.uploaded == 1
+    assert result.updated_roms[1].saves[0].save_filename == "Mario.srm"
+
+
+@respx.mock
+def test_download_uses_core_info_for_canonical_dir_casing(tmp_path: Path) -> None:
+    """RetroArch creates `Snes9x/` (capitalized per .info corename); decky
+    uploads with `retroarch-snes9x` (lowercase). The download path resolver
+    must use the .info index to write to the correctly-cased dir, otherwise
+    saves end up in `snes9x/` and `Snes9x/` parallel dirs."""
+    saves_dir = tmp_path / "saves"
+
+    info_dir = tmp_path / "cores"
+    info_dir.mkdir()
+    (info_dir / "snes9x_libretro.info").write_text('corename = "Snes9x"\n')
+
+    install = RetroArchInstall(
+        source="native",
+        cfg_path=tmp_path / "retroarch.cfg",
+        config_root=tmp_path,
+        savefile_directory=saves_dir,
+        sort_savefiles_enable=True,
+        sort_savefiles_by_content_enable=False,
+        has_saves=False,
+        core_info_candidates=(info_dir,),
+    )
+    rom = _make_rom(rom_id=1, source_filename="Mario.zip")
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[_server_save(save_id=99, rom_id=1, file_name="Mario.srm")],
+        )
+    )
+    respx.get(f"{BASE_URL}/api/saves/99/content").mock(
+        return_value=httpx.Response(200, content=b"data")
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1
+    # Capitalized — matches RA's actual on-disk layout.
+    assert (saves_dir / "Snes9x" / "Mario.srm").exists()
+    # Lowercase NOT present — would mean the .info lookup didn't take effect.
+    assert not (saves_dir / "snes9x" / "Mario.srm").exists()
+
+
+@respx.mock
+def test_download_works_when_dest_and_tmp_are_different_filesystems(tmp_path: Path) -> None:
+    """Regression: tempfile.TemporaryDirectory uses /tmp by default. When the
+    saves dir is on a different mount, the previous tmp→dest move would fail
+    with EXDEV. Now we download directly to dest via the existing .part-rename
+    pattern in `RommHttpAdapter.download`. This test stands in for that fix —
+    it doesn't actually exercise different filesystems (hard to do in pytest)
+    but confirms the download path doesn't crash and writes to the right place
+    even when /tmp would be a different fs in production."""
+    saves_dir = tmp_path / "saves"
+    install = _make_install(saves_dir, sort_by_core=True)
+    rom = _make_rom(rom_id=1)
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[_server_save(save_id=1, rom_id=1, file_name="Mario.srm")],
+        )
+    )
+    respx.get(f"{BASE_URL}/api/saves/1/content").mock(
+        return_value=httpx.Response(200, content=b"data")
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1
+    assert (saves_dir / "snes9x" / "Mario.srm").exists()
+    # No `.part` left behind (the http adapter cleans up on success).
+    assert not (saves_dir / "snes9x" / "Mario.srm.part").exists()
+
+
+@respx.mock
 def test_sync_picks_latest_server_save_when_slot_has_history(tmp_path: Path) -> None:
     """RomM accumulates timestamped saves per slot. The diff must use the
     most recent one by updated_at, not whichever happens to come first in

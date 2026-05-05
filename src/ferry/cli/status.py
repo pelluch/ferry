@@ -80,7 +80,7 @@ def status(ctx: click.Context) -> None:
 
     click.echo("")
     click.echo("[saves]")
-    _print_retroarch_status()
+    _print_retroarch_status(config)
 
     if state.roms and config.destination is not None:
         _print_reconcile(state, config)
@@ -89,12 +89,33 @@ def status(ctx: click.Context) -> None:
         click.echo("(state is empty — first sync will populate)")
 
 
-def _print_retroarch_status() -> None:
-    """One-line install summary, plus listing all candidates when ambiguous."""
+def _print_retroarch_status(config: Config) -> None:
+    """One-line install summary, plus listing all candidates when ambiguous.
+
+    When the user has `[saves].retroarch_install` configured AND it matches
+    a discovered install, the configured choice wins over auto-selection —
+    even if multiple installs would otherwise be ambiguous. That mirrors
+    what `ferry sync` actually does at runtime.
+    """
     installs = discover_retroarch_installs()
     if not installs:
         click.echo("  retroarch:   (not detected)")
         return
+
+    configured_choice = config.saves.retroarch_install if config.saves else None
+    if configured_choice is not None:
+        match = next((i for i in installs if i.source == configured_choice), None)
+        if match is not None:
+            _print_install_line(match, indent="  retroarch:   ")
+            click.echo(f"    (selected via [saves].retroarch_install = {configured_choice!r})")
+            return
+        # Configured value present but no discovered install matches — fall
+        # through to the auto-select path so the user sees what's actually
+        # there. The mismatch is also surfaced as a warning.
+        click.echo(
+            f"  warning: [saves].retroarch_install = {configured_choice!r} "
+            "but no discovered install matches; auto-selecting:"
+        )
 
     active = select_active_install(installs)
     if active is None:

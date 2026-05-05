@@ -34,6 +34,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ferry.adapters.retroarch_core_info import CoreInfoIndex
 from ferry.adapters.retroarch_paths import RetroArchInstall
 from ferry.domain.state import RomState
 
@@ -59,12 +60,21 @@ class LocalSave:
 def list_local_saves(
     install: RetroArchInstall,
     roms: Iterable[RomState],
+    core_info: CoreInfoIndex | None = None,
 ) -> tuple[list[LocalSave], list[str]]:
     """Walk *install*'s savefile directory and return matched saves + warnings.
 
     Treats a missing or non-directory savefile_directory as "no saves yet"
     (RetroArch creates it lazily). Returns sorted-by-path output for
     deterministic CLI display.
+
+    `core_info` (when provided) is used to convert RetroArch's per-core
+    save subdir name (e.g., `Snes9x`) back to the lowercase prefix
+    (`snes9x`) that decky-romm-sync uses as RomM's emulator label, so
+    ferry's uploads stay compatible with existing server-side records.
+    Without it, the dir name is used as-is — works in simple cases but
+    breaks compatibility when RA's corename is differently-cased than
+    the .so prefix.
     """
     saves_dir = install.savefile_directory
     if not saves_dir.is_dir():
@@ -88,6 +98,7 @@ def list_local_saves(
             rel,
             sort_savefiles_enable=install.sort_savefiles_enable,
             sort_savefiles_by_content_enable=install.sort_savefiles_by_content_enable,
+            core_info=core_info,
         )
         try:
             stat = path.stat()
@@ -117,6 +128,7 @@ def _emulator_from_layout(
     *,
     sort_savefiles_enable: bool,
     sort_savefiles_by_content_enable: bool,
+    core_info: CoreInfoIndex | None = None,
 ) -> str:
     """Map (path-relative-to-saves, sort_*) to the RomM emulator label.
 
@@ -126,6 +138,13 @@ def _emulator_from_layout(
       content    → <content>/file        → `retroarch` (we don't know the core)
       neither    → file                  → `retroarch`
 
+    The `<core>` segment is RetroArch's `corename` (e.g., `Snes9x`) —
+    cased per the core's `.info` file. The RomM emulator label uses the
+    lowercase `core_so` prefix (e.g., `snes9x`); when a `core_info`
+    index is provided we reverse-map. Without it (or for cores not in
+    the index) we use the dir name as-is; the casing-mismatch bug
+    recurs but functionality is preserved.
+
     Saves found at unexpected depths (e.g., user manually nested files
     inside what should be a flat layout) fall through to plain
     `retroarch` — better than guessing wrong.
@@ -133,13 +152,20 @@ def _emulator_from_layout(
     parts = rel.parts
     if sort_savefiles_enable and sort_savefiles_by_content_enable:
         if len(parts) >= 3:
-            return f"retroarch-{parts[1]}"
+            return f"retroarch-{_core_label(parts[1], core_info)}"
         return "retroarch"
     if sort_savefiles_enable and not sort_savefiles_by_content_enable:
         if len(parts) >= 2:
-            return f"retroarch-{parts[0]}"
+            return f"retroarch-{_core_label(parts[0], core_info)}"
         return "retroarch"
     return "retroarch"
+
+
+def _core_label(dir_name: str, core_info: CoreInfoIndex | None) -> str:
+    """Convert RetroArch's per-core dir name to the RomM emulator suffix."""
+    if core_info is None:
+        return dir_name
+    return core_info.reverse(dir_name)
 
 
 def _build_stem_index(roms: Iterable[RomState]) -> dict[str, RomState]:

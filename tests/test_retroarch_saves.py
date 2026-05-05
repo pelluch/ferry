@@ -244,6 +244,52 @@ def test_empty_saves_dir_returns_empty(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Casing round-trip via CoreInfoIndex
+# ---------------------------------------------------------------------------
+
+
+def test_walker_uses_core_info_for_lowercase_emulator_label(tmp_path: Path) -> None:
+    """When CoreInfoIndex is provided, dir name `Snes9x` reverses to `snes9x`
+    so the emulator label matches what decky-romm-sync uploads to RomM."""
+    from ferry.adapters.retroarch_core_info import CoreInfoIndex
+
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "Snes9x").mkdir(parents=True)
+    (saves_dir / "Snes9x" / "Mario.srm").write_bytes(b"x")
+
+    info_dir = tmp_path / "cores"
+    info_dir.mkdir()
+    (info_dir / "snes9x_libretro.info").write_text('corename = "Snes9x"\n')
+
+    install = RetroArchInstall(
+        source="native",
+        cfg_path=tmp_path / "retroarch.cfg",
+        config_root=tmp_path,
+        savefile_directory=saves_dir,
+        sort_savefiles_enable=True,
+        sort_savefiles_by_content_enable=False,
+        has_saves=True,
+        core_info_candidates=(info_dir,),
+    )
+    rom = _make_rom(1, source_filename="Mario.zip")
+    matched, warnings = list_local_saves(install, [rom], core_info=CoreInfoIndex(install))
+    assert warnings == []
+    assert matched[0].emulator == "retroarch-snes9x"
+
+
+def test_walker_falls_back_to_dir_name_when_no_core_info(tmp_path: Path) -> None:
+    """No core_info argument → dir name passed through unchanged."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "Snes9x").mkdir(parents=True)
+    (saves_dir / "Snes9x" / "Mario.srm").write_bytes(b"x")
+    install = _install(saves_dir, sort_by_core=True)
+    rom = _make_rom(1, source_filename="Mario.zip")
+    matched, _ = list_local_saves(install, [rom])
+    # Without index, dir name flows through as-is.
+    assert matched[0].emulator == "retroarch-Snes9x"
+
+
 def test_saves_returned_in_sorted_path_order(tmp_path: Path) -> None:
     saves = tmp_path / "saves"
     (saves / "snes9x").mkdir(parents=True)

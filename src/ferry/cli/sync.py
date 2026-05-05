@@ -145,6 +145,7 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
 
             if dry_run:
                 _print_plan(plan, full=full, config=config)
+                _print_save_sync_preview(config)
                 return
 
             # Purge expired trash *only* on the real-run path. Dry-run must
@@ -205,6 +206,52 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
         ) from e
     except RommApiError as e:
         raise click.ClickException(str(e)) from e
+
+
+def _print_save_sync_preview(config: Config) -> None:
+    """Show what `ferry sync` (real run) WOULD do for save sync.
+
+    Resolution-only — no HTTP calls, no state mutation. Mirrors the same
+    install-selection logic as the real run so users can verify their
+    [saves].retroarch_install setting before committing to a sync.
+    """
+    if config.saves is None:
+        return  # silent — feature is opt-in
+    click.echo("")
+    if not config.saves.enabled:
+        click.echo("Save sync: disabled ([saves].enabled = false)")
+        return
+    installs = discover_retroarch_installs()
+    if not installs:
+        click.echo("Save sync: would skip (no RetroArch install detected)")
+        return
+    if config.saves.retroarch_install is not None:
+        match = next(
+            (i for i in installs if i.source == config.saves.retroarch_install),
+            None,
+        )
+        if match is None:
+            click.echo(
+                f"Save sync: would skip ([saves].retroarch_install = "
+                f"{config.saves.retroarch_install!r} but no install matches)"
+            )
+            return
+        click.echo(
+            f"Save sync: would target {match.source} @ {match.savefile_directory} "
+            f"(selected via [saves].retroarch_install)"
+        )
+        return
+    active = select_active_install(installs)
+    if active is None:
+        click.echo(
+            "Save sync: would skip (multiple active installs — set [saves].retroarch_install)"
+        )
+        return
+    why = "has active saves" if active.has_saves else "priority order"
+    click.echo(
+        f"Save sync: would target {active.source} @ {active.savefile_directory} "
+        f"(selected because {why})"
+    )
 
 
 def _prepare_save_backend(

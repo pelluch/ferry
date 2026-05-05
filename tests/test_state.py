@@ -87,6 +87,110 @@ def test_root_must_be_object() -> None:
         from_json("[]")
 
 
+# ---------------------------------------------------------------------------
+# SaveRecord schema (v2)
+# ---------------------------------------------------------------------------
+
+
+def _save_record_dict() -> dict:
+    return {
+        "emulator": "retroarch-snes9x",
+        "slot": "default",
+        "save_filename": "Mario.srm",
+        "last_sync_md5": "a" * 32,
+        "last_sync_server_size": 1024,
+        "last_sync_server_updated_at": "2026-04-25T12:00:00Z",
+        "last_synced_at": "2026-04-25T12:00:01Z",
+        "server_save_id": 5,
+    }
+
+
+def test_rom_with_saves_round_trips(make_rom) -> None:
+    """RomState.saves serializes and deserializes via from_json/to_json."""
+    rom_dict = json.loads(rom_to_json(make_rom()))
+    rom_dict["saves"] = [_save_record_dict()]
+    payload = {
+        "schema_version": 2,
+        "roms": {str(rom_dict["rom_id"]): rom_dict},
+    }
+    state = from_json(json.dumps(payload))
+    rom = next(iter(state.roms.values()))
+    assert len(rom.saves) == 1
+    sr = rom.saves[0]
+    assert sr.emulator == "retroarch-snes9x"
+    assert sr.server_save_id == 5
+
+
+def test_v1_state_loads_with_default_empty_saves(make_rom) -> None:
+    """A v1 state document (no `saves` key) loads cleanly with empty saves tuple."""
+    rom_dict = json.loads(rom_to_json(make_rom()))
+    rom_dict.pop("saves", None)  # ensure no saves key
+    payload = {
+        "schema_version": 1,
+        "roms": {str(rom_dict["rom_id"]): rom_dict},
+    }
+    state = from_json(json.dumps(payload))
+    rom = next(iter(state.roms.values()))
+    assert rom.saves == ()
+
+
+def test_save_record_missing_required_string_raises() -> None:
+    rom_dict = {
+        "rom_id": 1,
+        "platform_slug": "snes",
+        "name": "X",
+        "source_filename": "X.zip",
+        "source_md5": "a" * 32,
+        "source_size": 1,
+        "source_updated_at": "2026-01-01T00:00:00Z",
+        "transforms": [],
+        "outputs": [{"path": "x", "md5": "b" * 32, "size": 1}],
+        "primary_output_index": 0,
+        "synced_at": "2026-01-01T00:00:01Z",
+        "saves": [{**_save_record_dict(), "emulator": 42}],  # type: ignore[dict-item]
+    }
+    payload = {"schema_version": 2, "roms": {"1": rom_dict}}
+    with pytest.raises(StateDecodeError, match="emulator"):
+        from_json(json.dumps(payload))
+
+
+def test_save_record_missing_int_field_raises() -> None:
+    sr = _save_record_dict()
+    sr["server_save_id"] = "five"  # type: ignore[assignment]
+    rom_dict = {
+        "rom_id": 1,
+        "platform_slug": "snes",
+        "name": "X",
+        "source_filename": "X.zip",
+        "source_md5": "a" * 32,
+        "source_size": 1,
+        "source_updated_at": "2026-01-01T00:00:00Z",
+        "transforms": [],
+        "outputs": [{"path": "x", "md5": "b" * 32, "size": 1}],
+        "primary_output_index": 0,
+        "synced_at": "2026-01-01T00:00:01Z",
+        "saves": [sr],
+    }
+    payload = {"schema_version": 2, "roms": {"1": rom_dict}}
+    with pytest.raises(StateDecodeError, match="server_save_id"):
+        from_json(json.dumps(payload))
+
+
+def test_state_round_trips_device_id(make_rom) -> None:
+    state = from_json(json.dumps({"schema_version": 2, "device_id": "uuid-abc", "roms": {}}))
+    assert state.device_id == "uuid-abc"
+
+
+def test_state_device_id_optional() -> None:
+    state = from_json(json.dumps({"schema_version": 2, "roms": {}}))
+    assert state.device_id is None
+
+
+def test_state_device_id_must_be_string_when_present() -> None:
+    with pytest.raises(StateDecodeError, match="device_id"):
+        from_json(json.dumps({"schema_version": 2, "device_id": 42, "roms": {}}))
+
+
 def test_rom_key_value_id_mismatch_raises(make_rom) -> None:
     payload = json.dumps(
         {
