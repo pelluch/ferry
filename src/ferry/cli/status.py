@@ -22,6 +22,7 @@ from ferry.adapters.dolphin_paths import (
 from ferry.adapters.dolphin_paths import (
     select_active_install as select_active_dolphin,
 )
+from ferry.adapters.esde_paths import discover_esde_installs
 from ferry.adapters.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
@@ -89,6 +90,10 @@ def status(ctx: click.Context) -> None:
     click.echo("[saves]")
     _print_retroarch_status(config)
     _print_dolphin_status(config)
+
+    click.echo("")
+    click.echo("[launch_hooks]")
+    _print_esde_status()
 
     if state.roms and config.destination is not None:
         _print_reconcile(state, config)
@@ -208,6 +213,30 @@ def _print_dolphin_install_line(install: DolphinInstall, *, indent: str) -> None
     elif mode == "other":
         suffix = " — Slot A is an unsupported device type"
     click.echo(f"{indent}{install.source} @ {install.saves_root} ({mode}){suffix}")
+
+
+def _print_esde_status() -> None:
+    """List discovered ES-DE installs and whether launch hooks are wired up.
+
+    The "wired up" check is just `has_custom_systems_file` for now — a
+    proxy for "user has run install-launch-hooks or hand-edited an
+    override." When ck3b ships, this should also check whether the
+    managed block is present in the file.
+    """
+    installs = discover_esde_installs()
+    if not installs:
+        click.echo("  esde:        (not detected)")
+        return
+    for install in installs:
+        bundled_repr = (
+            str(install.bundled_systems_xml)
+            if install.bundled_systems_xml
+            else "(no bundled systems file found)"
+        )
+        custom_status = "exists" if install.has_custom_systems_file else "not yet created"
+        click.echo(f"  esde:        {install.source}")
+        click.echo(f"    bundled:   {bundled_repr}")
+        click.echo(f"    custom:    {install.custom_systems_xml} ({custom_status})")
 
 
 def _print_reconcile(state: LibraryState, config: Config) -> None:

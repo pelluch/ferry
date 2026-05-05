@@ -6,14 +6,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ferry.config.schema import Config, RommConfig, SavesConfig, SyncConfig, TransformsConfig
+from ferry.config.schema import (
+    Config,
+    LaunchHooksConfig,
+    RommConfig,
+    SavesConfig,
+    SyncConfig,
+    TransformsConfig,
+)
 from ferry.domain.destination import PRESETS, Destination, resolve_preset
 from ferry.transforms import known_transforms
 
 ENV_API_KEY = "FERRY_ROMM_API_KEY"
 ENV_CONFIG_PATH = "FERRY_CONFIG"
 
-_TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync", "transforms", "saves"})
+_TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync", "transforms", "saves", "launch_hooks"})
+_LAUNCH_HOOKS_KEYS = frozenset({"log_enabled", "log_path"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
 _DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
 _SYNC_KEYS = frozenset(
@@ -123,6 +131,7 @@ def load_config(
     sync = _parse_sync(raw, path)
     transforms = _parse_transforms(raw, path)
     saves = _parse_saves(raw, path)
+    launch_hooks = _parse_launch_hooks(raw, path)
 
     config = Config(
         romm=RommConfig(
@@ -134,8 +143,38 @@ def load_config(
         sync=sync,
         transforms=transforms,
         saves=saves,
+        launch_hooks=launch_hooks,
     )
     return LoadedConfig(config=config, config_path=path, api_key_source=api_key_source)
+
+
+def _parse_launch_hooks(raw: dict, path: Path) -> LaunchHooksConfig:
+    """Parse the optional `[launch_hooks]` section.
+
+    Section is fully optional — defaults give sensible behavior
+    (logging on, default log path). Section presence with empty body
+    behaves the same as the section being absent.
+    """
+    if "launch_hooks" not in raw:
+        return LaunchHooksConfig()
+    section = raw["launch_hooks"]
+    if not isinstance(section, dict):
+        raise ConfigInvalidError(f"[launch_hooks] must be a table in {path}")
+    unknown = set(section.keys()) - _LAUNCH_HOOKS_KEYS
+    if unknown:
+        raise ConfigInvalidError(f"unknown keys under [launch_hooks] in {path}: {sorted(unknown)}")
+    log_enabled = section.get("log_enabled", True)
+    if not isinstance(log_enabled, bool):
+        raise ConfigInvalidError(f"[launch_hooks].log_enabled must be a boolean in {path}")
+    log_path_raw = section.get("log_path")
+    log_path: Path | None = None
+    if log_path_raw is not None:
+        if not isinstance(log_path_raw, str) or not log_path_raw:
+            raise ConfigInvalidError(
+                f"[launch_hooks].log_path must be a non-empty string in {path}"
+            )
+        log_path = Path(log_path_raw).expanduser()
+    return LaunchHooksConfig(log_enabled=log_enabled, log_path=log_path)
 
 
 def _parse_saves(raw: dict, path: Path) -> SavesConfig | None:

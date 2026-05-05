@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ferry.domain.destination import Destination
 
@@ -76,9 +77,33 @@ class SavesConfig:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class LaunchHooksConfig:
+    """Settings for the `ferry install-launch-hooks` system (DESIGN.md §7 v8).
+
+    Hooks wrap each ES-DE system's launch command with pre/post calls
+    to `ferry sync --rom`, so save data syncs to RomM around every
+    game session. The wrapper script writes to a single log file
+    that's truncated at the start of each session — one game = one
+    log file replacement.
+
+    `log_enabled = false` makes the wrapper run silently (still syncs,
+    just no logging). `log_path` overrides the default location of
+    `$XDG_STATE_HOME/ferry/launch.log`.
+    """
+
+    log_enabled: bool = True
+    log_path: Path | None = None
+
+
+def _default_launch_hooks() -> LaunchHooksConfig:
+    return LaunchHooksConfig()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Config:
     romm: RommConfig
     destination: Destination | None = None
     sync: SyncConfig | None = None
     transforms: TransformsConfig = field(default_factory=_empty_transforms)
     saves: SavesConfig | None = None
+    launch_hooks: LaunchHooksConfig = field(default_factory=_default_launch_hooks)

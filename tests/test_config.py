@@ -633,3 +633,85 @@ def test_saves_unknown_key_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigInvalidError, match=r"unknown keys under \[saves\]"):
         load_config(cfg_file, env={})
+
+
+# ---------------------------------------------------------------------------
+# [launch_hooks] section (v8)
+# ---------------------------------------------------------------------------
+
+
+def test_no_launch_hooks_section_uses_defaults(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml())
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.launch_hooks.log_enabled is True
+    assert loaded.config.launch_hooks.log_path is None
+
+
+def test_empty_launch_hooks_section_uses_defaults(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[launch_hooks]\n")
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.launch_hooks.log_enabled is True
+
+
+def test_launch_hooks_log_disabled(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + "\n[launch_hooks]\nlog_enabled = false\n",
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.launch_hooks.log_enabled is False
+
+
+def test_launch_hooks_custom_log_path(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[launch_hooks]\nlog_path = "/var/log/ferry/launch.log"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.launch_hooks.log_path == Path("/var/log/ferry/launch.log")
+
+
+def test_launch_hooks_log_path_expands_tilde(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[launch_hooks]\nlog_path = "~/custom-launch.log"\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.launch_hooks.log_path is not None
+    assert not str(loaded.config.launch_hooks.log_path).startswith("~")
+
+
+def test_launch_hooks_log_enabled_must_be_bool(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[launch_hooks]\nlog_enabled = "yes"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="log_enabled"):
+        load_config(cfg_file, env={})
+
+
+def test_launch_hooks_log_path_must_be_non_empty_string(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[launch_hooks]\nlog_path = ""\n',
+    )
+    with pytest.raises(ConfigInvalidError, match="log_path"):
+        load_config(cfg_file, env={})
+
+
+def test_launch_hooks_section_must_be_table(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        f'launch_hooks = "on"\n{minimal_toml()}',
+    )
+    with pytest.raises(ConfigInvalidError, match=r"\[launch_hooks\] must be a table"):
+        load_config(cfg_file, env={})
+
+
+def test_launch_hooks_unknown_key_raises(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[launch_hooks]\nbogus = "x"\n',
+    )
+    with pytest.raises(ConfigInvalidError, match=r"unknown keys under \[launch_hooks\]"):
+        load_config(cfg_file, env={})
