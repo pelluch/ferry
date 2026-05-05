@@ -302,15 +302,18 @@ def test_sync_ignores_retroarch_server_saves(tmp_path: Path) -> None:
 
 
 def test_index_dolphin_server_saves_filters_emulator() -> None:
-    """Direct unit check on the index helper — non-dolphin entries are dropped."""
-    from ferry.services.dolphin_save_backend import _index_dolphin_server_saves
+    """Direct unit check on the indexer with Dolphin's emulator predicate —
+    non-dolphin entries are dropped."""
+    from ferry.services.save_backend_base import index_server_saves
 
     saves = [
         _server_save(save_id=1, rom_id=1, emulator="dolphin", slot="A"),
         _server_save(save_id=2, rom_id=1, emulator="retroarch-snes9x", slot="default"),
         _server_save(save_id=3, rom_id=2, emulator="dolphin", slot="B"),
     ]
-    indexed = _index_dolphin_server_saves(saves)
+    indexed = index_server_saves(
+        saves, emulator_matches=lambda e: e == "dolphin", default_slot="default"
+    )
     assert set(indexed.keys()) == {(1, "dolphin", "A"), (2, "dolphin", "B")}
 
 

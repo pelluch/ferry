@@ -28,13 +28,17 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass
 from pathlib import Path
 
 from ferry.adapters.dolphin_paths import DolphinInstall, RegionEncoding
 from ferry.adapters.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
 from ferry.domain.platforms import resolve_platform_dir
+from ferry.domain.save_local import LocalSave
 from ferry.domain.state import RomState
+
+# Re-export so existing `from ferry.adapters.dolphin_saves import LocalSave`
+# imports keep working. The canonical home is `ferry.domain.save_local`.
+__all__ = ("LocalSave", "list_local_saves", "lookup_disc_header", "resolve_save_path")
 
 logger = logging.getLogger(__name__)
 
@@ -55,27 +59,6 @@ _REGION_FOLDERS_2LETTER: dict[str, str] = {
     "NTSC-J": "JP",
     "PAL": "EU",
 }
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class LocalSave:
-    """A Dolphin .gci save file present on disk, matched against a known ROM.
-
-    Field shape mirrors v2's `retroarch_saves.LocalSave` deliberately —
-    when checkpoint 6 extracts the SaveBackend Protocol, both backends
-    collapse to a shared type without surgery. `slot` semantics differ
-    (v2: SRAM "default" / state slot index; v3: in-game save name from
-    GCI's directory entry) but both are stable string keys per backend.
-    """
-
-    rom_id: int
-    emulator: str  # always "dolphin" for v3
-    slot: str  # e.g. "MetroidPrime A", "f_zero.dat", "SuperSmashBros0110290334"
-    save_filename: str  # e.g. "01-GM8E-MetroidPrime A.gci"
-    local_path: Path
-    local_mtime: float
-    local_md5: str
-    local_size: int
 
 
 def list_local_saves(

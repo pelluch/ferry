@@ -53,6 +53,7 @@ from ferry.services.save_backend import (
     SaveSyncResult,
     get_or_register_device,
 )
+from ferry.services.save_backend_base import SaveBackend
 from ferry.services.sync_executor import (
     ExecutionResult,
     default_scratch_root,
@@ -63,10 +64,10 @@ from ferry.services.trash import default_trash_root, purge_expired
 
 logger = logging.getLogger(__name__)
 
-# Local Protocol-like alias — both backends expose `.sync()` and
-# `.delete_for_rom()`. Until checkpoint 6 extracts a real Protocol, the
-# union keeps the type information honest.
-_SaveBackend = RetroArchSaveBackend | DolphinSaveBackend
+# `SaveBackend` is the structural Protocol from `save_backend_base`;
+# all `_prepare_save_backends` / `_run_*` helpers operate on it
+# uniformly. Concrete backends (RetroArch + Dolphin) are constructed
+# in `_prepare_save_backends` and stored as `list[SaveBackend]`.
 
 # How many entries per section to print before truncating with "... and N more".
 _DEFAULT_PREVIEW = 20
@@ -419,7 +420,7 @@ def _prepare_save_backends(
     api: RommApi,
     state: LibraryState,
     state_path,
-) -> tuple[list[_SaveBackend], LibraryState]:
+) -> tuple[list[SaveBackend], LibraryState]:
     """Build every configured save backend (RetroArch + Dolphin).
 
     Both backends share the device_id — registration runs once. On
@@ -459,7 +460,7 @@ def _prepare_save_backends(
     if state.device_id is not None:
         save_state(state, state_path)
 
-    backends: list[_SaveBackend] = []
+    backends: list[SaveBackend] = []
     if ra_install is not None:
         backends.append(
             RetroArchSaveBackend(install=ra_install, api=api, device_id=device_id, log=logger)
@@ -575,7 +576,7 @@ def _build_dolphin_backend(
     )
 
 
-def _delete_for_rom_all(backends: list[_SaveBackend], rom, trash_dir: Path) -> None:
+def _delete_for_rom_all(backends: list[SaveBackend], rom, trash_dir: Path) -> None:
     """Fire each backend's delete_for_rom hook for a trashed ROM.
 
     Each backend writes its own files into `<trash_dir>/saves/...` —
@@ -592,7 +593,7 @@ def _delete_for_rom_all(backends: list[_SaveBackend], rom, trash_dir: Path) -> N
 
 
 def _run_all_save_syncs(
-    backends: list[_SaveBackend],
+    backends: list[SaveBackend],
     state: LibraryState,
     state_path,
 ) -> None:
@@ -604,7 +605,7 @@ def _run_all_save_syncs(
 
 
 def _run_save_sync(
-    backend: _SaveBackend,
+    backend: SaveBackend,
     state: LibraryState,
     state_path,
 ) -> None:

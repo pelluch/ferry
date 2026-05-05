@@ -31,30 +31,20 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass
 from pathlib import Path
 
 from ferry.adapters.retroarch_core_info import CoreInfoIndex
 from ferry.adapters.retroarch_paths import RetroArchInstall
+from ferry.domain.save_local import LocalSave
 from ferry.domain.state import RomState
+
+# Re-export so existing `from ferry.adapters.retroarch_saves import LocalSave`
+# imports keep working. The canonical home is `ferry.domain.save_local`.
+__all__ = ("LocalSave", "list_local_saves")
 
 logger = logging.getLogger(__name__)
 
 _HASH_BLOCK_SIZE = 64 * 1024
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class LocalSave:
-    """A save file present on disk, matched against a known ROM."""
-
-    rom_id: int
-    emulator: str  # "retroarch" or "retroarch-<core>"
-    slot: str  # "default" for v2 (SRAM-style)
-    save_filename: str
-    local_path: Path
-    local_mtime: float
-    local_md5: str
-    local_size: int
 
 
 def list_local_saves(
