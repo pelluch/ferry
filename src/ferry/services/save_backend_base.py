@@ -91,6 +91,8 @@ class SaveBackend(Protocol):
 
     def sync(self, state: LibraryState) -> SaveSyncResult: ...
 
+    def sync_for_rom(self, rom: RomState, state: LibraryState) -> SaveSyncResult: ...
+
     def plan(self, state: LibraryState) -> SavePlan: ...
 
     def delete_for_rom(self, rom: RomState, trash_dir: Path) -> tuple[int, list[str]]: ...
@@ -467,6 +469,82 @@ class SaveBackendBase(ABC):
             rom = state.roms[rom_id]
             new_saves = merge_save_records(rom.saves, updates)
             result.updated_roms[rom_id] = RomState(**{**rom_as_kwargs(rom), "saves": new_saves})
+
+        return result
+
+    # ------------------------------------------------------------------
+    # sync_for_rom — narrowed to a single ROM
+    # ------------------------------------------------------------------
+
+    def sync_for_rom(self, rom: RomState, state: LibraryState) -> SaveSyncResult:
+        """Run save sync narrowed to a single ROM.
+
+        Same dispatch logic as `.sync(state)` but the walker is given just
+        `[rom]`, the server fetch is filtered to that rom_id only, and only
+        that rom's prior records are considered. Used by launch-wrapper
+        hooks (`ferry sync --rom`) for fast per-game pre/post sync — one
+        narrow GET, one walker call, no full-library scan.
+
+        If `rom` isn't in `state.roms` (orphan, not tracked by ferry yet),
+        returns an empty result silently — the launch wrapper proceeds and
+        the user can `ferry sync` to register the ROM properly.
+        """
+        if rom.rom_id not in state.roms:
+            return SaveSyncResult()
+
+        local_saves, walker_warnings = self._walk_local_for([rom])
+        # Walker stem-mismatch warnings (RetroArch's "could not match save X
+        # to any known ROM") are spam in narrow mode — the walker was given
+        # one ROM's stem index, so most files in the saves dir won't match.
+        # That's expected, not a finding. Other walker warnings (file read
+        # errors, header failures, region issues) still pass through.
+        walker_warnings = [w for w in walker_warnings if "could not match" not in w]
+
+        try:
+            server_saves = self._api.list_saves(
+                rom_id=rom.rom_id, device_id=self._device_id or None
+            )
+        except RommApiError as exc:
+            return SaveSyncResult(
+                failed=[f"could not list server saves: {exc}"],
+                warnings=walker_warnings,
+            )
+
+        local_by_key = {(ls.rom_id, ls.emulator, ls.slot): ls for ls in local_saves}
+        server_by_key = index_server_saves(
+            server_saves,
+            emulator_matches=self._emulator_matches,
+            default_slot=self.default_slot,
+        )
+        # Prior records narrowed to this rom only — bypass the full
+        # `index_prior_records` scan since we already have the rom in hand.
+        prev_by_key = {
+            (rom.rom_id, sr.emulator, sr.slot): sr
+            for sr in rom.saves
+            if self._emulator_matches(sr.emulator)
+        }
+
+        all_keys = set(local_by_key) | set(server_by_key) | set(prev_by_key)
+
+        result = SaveSyncResult(warnings=list(walker_warnings))
+        rom_save_updates: dict[tuple[str, str], SaveRecord | None] = {}
+
+        for key in sorted(all_keys):
+            rom_id, emulator, slot = key
+            if rom_id != rom.rom_id:
+                continue  # defensive; the API filter should already enforce this
+            local = local_by_key.get(key)
+            server = server_by_key.get(key)
+            prev = prev_by_key.get(key)
+            should_update, outcome = self._process_key(
+                rom, emulator, slot, local, server, prev, result
+            )
+            if should_update:
+                rom_save_updates[(emulator, slot)] = outcome
+
+        if rom_save_updates:
+            new_saves = merge_save_records(rom.saves, rom_save_updates)
+            result.updated_roms[rom.rom_id] = RomState(**{**rom_as_kwargs(rom), "saves": new_saves})
 
         return result
 

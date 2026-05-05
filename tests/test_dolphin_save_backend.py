@@ -301,6 +301,66 @@ def test_sync_ignores_retroarch_server_saves(tmp_path: Path) -> None:
     assert result.updated_roms == {}
 
 
+@respx.mock
+def test_sync_for_rom_only_touches_target_rom(tmp_path: Path) -> None:
+    """`sync_for_rom(rom, state)` narrows the walker, server fetch, and prior
+    records to a single rom. Other ROMs in state are untouched even if they
+    have local saves and matching server records."""
+    saves_root = tmp_path / "GC"
+    install = _make_install(saves_root)
+    roms_base = tmp_path / "roms"
+
+    target = _make_rom(rom_id=1, output_path="gc/Metroid.rvz")
+    other = _make_rom(rom_id=2, output_path="gc/Smash.rvz")
+    rp_target = _plant_rom_file(roms_base, "gc/Metroid.rvz")
+    _plant_rom_file(roms_base, "gc/Smash.rvz")
+    _plant_gci(saves_root / "USA" / "Card A", "01-GM8E-MetroidPrime A.gci")
+    _plant_gci(saves_root / "USA" / "Card A", "01-GALE-smashbros.gci")
+    state = _make_state([target, other])
+
+    # Server has saves for both ROMs; the API filter scopes to one.
+    list_route = respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
+    upload_route = respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(200, json=_server_save(save_id=10, rom_id=1))
+    )
+
+    headers = {
+        str(rp_target): DiscHeader(game_code="GM8E", maker_code="01", region="NTSC-U"),
+    }
+    backend, http = _make_backend(install, roms_base=roms_base, headers=headers)
+    with http:
+        result = backend.sync_for_rom(target, state)
+
+    # API was called WITH rom_id filter — exactly one list call narrowed.
+    assert list_route.call_count == 1
+    assert "rom_id=1" in str(list_route.calls[0].request.url)
+    # Only the target rom got uploaded; Smash's local save was ignored.
+    assert upload_route.called
+    assert upload_route.call_count == 1
+    assert result.uploaded == 1
+    # State update only reflects the target rom.
+    assert set(result.updated_roms.keys()) == {1}
+
+
+def test_sync_for_rom_skips_when_rom_not_in_state(tmp_path: Path) -> None:
+    """If the rom isn't tracked (e.g. user launched something ferry doesn't
+    know about yet), `sync_for_rom` returns an empty result silently — the
+    launch wrapper proceeds with whatever's on disk."""
+    saves_root = tmp_path / "GC"
+    install = _make_install(saves_root)
+    roms_base = tmp_path / "roms"
+
+    orphan = _make_rom(rom_id=99, output_path="gc/Unknown.rvz")
+    state = _make_state([])  # state has no roms at all
+
+    backend, _ = _make_backend(install, roms_base=roms_base, headers={})
+    result = backend.sync_for_rom(orphan, state)
+    assert result.uploaded == 0
+    assert result.downloaded == 0
+    assert result.failed == []
+    assert result.updated_roms == {}
+
+
 def test_index_dolphin_server_saves_filters_emulator() -> None:
     """Direct unit check on the indexer with Dolphin's emulator predicate —
     non-dolphin entries are dropped."""

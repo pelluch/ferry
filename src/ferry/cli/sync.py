@@ -28,6 +28,7 @@ from ferry.adapters.romm import (
     RommForbiddenError,
     RommHttpAdapter,
 )
+from ferry.adapters.sidecar import read_sidecar
 from ferry.adapters.state_store import (
     default_state_path,
     ensure_sidecars,
@@ -39,7 +40,7 @@ from ferry.config import ConfigError, SavesConfig, SyncConfig, load_config
 from ferry.config.schema import Config
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.save_plan import PlannedSaveAction, SavePlan
-from ferry.domain.state import LibraryState
+from ferry.domain.state import LibraryState, RomState
 from ferry.domain.sync_plan import (
     AddAction,
     DeleteAction,
@@ -84,8 +85,29 @@ _DEFAULT_PREVIEW = 20
     is_flag=True,
     help="Print every entry in each section instead of truncating (dry-run only).",
 )
+@click.option(
+    "--saves-only",
+    is_flag=True,
+    help="Skip library reconciliation; only sync save data.",
+)
+@click.option(
+    "--rom",
+    "rom_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Sync save data only for the ROM at this path (resolves rom_id from "
+        "the ROM's sidecar). Implies --saves-only. Used by launch-wrapper hooks."
+    ),
+)
 @click.pass_context
-def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
+def sync(
+    ctx: click.Context,
+    dry_run: bool,
+    full: bool,
+    saves_only: bool,
+    rom_path: Path | None,
+) -> None:
     """Sync the configured collection from RomM to the destination."""
     try:
         loaded = load_config(ctx.obj.get("config_path"))
@@ -93,22 +115,31 @@ def sync(ctx: click.Context, dry_run: bool, full: bool) -> None:
         raise click.ClickException(str(e)) from e
 
     config = loaded.config
-    if config.sync is None:
-        raise click.ClickException(
-            "[sync] is required for sync. Add at least one source to your config:\n\n"
-            "    [sync]\n"
-            '    collections = ["Steam Deck"]\n'
-            '    # or platforms = ["gba", "snes"]'
-        )
-    if config.destination is None:
-        raise click.ClickException(
-            "[destination] is required for sync. Run `ferry detect` for help."
-        )
+    # --rom narrows save sync to a single game; library work is meaningless
+    # in that scope, so it implies --saves-only.
+    if rom_path is not None:
+        saves_only = True
 
-    sync_cfg: SyncConfig = config.sync
+    if not saves_only:
+        if config.sync is None:
+            raise click.ClickException(
+                "[sync] is required for sync. Add at least one source to your config:\n\n"
+                "    [sync]\n"
+                '    collections = ["Steam Deck"]\n'
+                '    # or platforms = ["gba", "snes"]'
+            )
+        if config.destination is None:
+            raise click.ClickException(
+                "[destination] is required for sync. Run `ferry detect` for help."
+            )
+
     try:
         with acquire_sync_lock(default_lock_path()):
-            _run_sync(config, sync_cfg, dry_run=dry_run, full=full)
+            if saves_only:
+                _run_saves_only(config, dry_run=dry_run, full=full, rom_path=rom_path)
+            else:
+                assert config.sync is not None  # checked above
+                _run_sync(config, config.sync, dry_run=dry_run, full=full)
     except LockHeld as e:
         raise click.ClickException(
             f"another ferry sync is already running (pid {e.pid}, lock at "
@@ -225,6 +256,79 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
         ) from e
     except RommApiError as e:
         raise click.ClickException(str(e)) from e
+
+
+def _run_saves_only(
+    config: Config,
+    *,
+    dry_run: bool,
+    full: bool,
+    rom_path: Path | None,
+) -> None:
+    """Save-sync-only path. Skips library reconciliation entirely.
+
+    `--saves-only` runs a full save-sync (every backend, every tracked
+    ROM). `--rom <path>` (which implies --saves-only) further narrows to
+    a single ROM via the per-backend `sync_for_rom` method — used by
+    launch-wrapper hooks for fast pre/post sync per game.
+
+    Save sync requires `[saves]` to be configured. If not, this is a
+    no-op with a friendly hint.
+    """
+    if config.saves is None or not config.saves.enabled:
+        click.echo("Save sync is not configured. Add a `[saves]` section to your config.")
+        return
+
+    state_path = default_state_path()
+    state = load_state(state_path)
+
+    rom: RomState | None = None
+    if rom_path is not None:
+        rom = _find_rom_by_path(state, rom_path)
+        if rom is None:
+            raise click.ClickException(
+                f"ROM at {rom_path} isn't tracked by ferry — no sidecar found at "
+                f"that path. Run `ferry sync` to register the library first."
+            )
+
+    click.echo(f"connecting to {config.romm.url}…")
+    try:
+        with RommHttpAdapter(config.romm, logger) as http:
+            api = RommApi(http)
+            if dry_run:
+                # The existing preview path covers the "all backends, full sync"
+                # case. For --rom we'd want a narrower preview but that's
+                # out of MVP scope; the preview shows what a full save sync
+                # would do, which is a superset of the per-rom plan.
+                _print_save_sync_preview(config, api, state, full=full)
+                return
+            save_backends, state = _prepare_save_backends(config, api, state, state_path)
+            if not save_backends:
+                return
+            _run_all_save_syncs(save_backends, state, state_path, rom=rom)
+    except RommAuthError as e:
+        raise click.ClickException(
+            f"{e}\n\ncheck the API key — it may be expired or revoked."
+        ) from e
+    except RommApiError as e:
+        # Per the user's "RomM unreachable shouldn't block" stance, log + exit
+        # 0 — the launch wrapper continues with whatever's on disk. Library
+        # mode (full sync) treats RomMApiError as fatal because the user
+        # explicitly invoked it; saves-only is more often run from automation
+        # (launch hooks) where we want to fail soft.
+        click.echo(f"save sync skipped: {e}")
+
+
+def _find_rom_by_path(state: LibraryState, rom_path: Path) -> RomState | None:
+    """Resolve a ROM file path to its RomState via sidecar lookup.
+
+    Returns None when no sidecar exists at the path or the rom_id from
+    the sidecar isn't in state. The caller surfaces a friendly error.
+    """
+    sidecar_rom = read_sidecar(rom_path)
+    if sidecar_rom is None:
+        return None
+    return state.roms.get(sidecar_rom.rom_id)
 
 
 def _print_save_sync_preview(
@@ -596,27 +700,39 @@ def _run_all_save_syncs(
     backends: list[SaveBackend],
     state: LibraryState,
     state_path,
+    *,
+    rom: RomState | None = None,
 ) -> None:
-    """Run every backend's sync sequentially and print per-backend summaries."""
+    """Run every backend's sync sequentially and print per-backend summaries.
+
+    `rom` narrows each backend to `sync_for_rom(rom, state)` — used by the
+    `--rom` launch-wrapper mode. Default (None) runs full per-backend sync.
+    """
     if not backends:
         return
     for backend in backends:
-        _run_save_sync(backend, state, state_path)
+        _run_save_sync(backend, state, state_path, rom=rom)
 
 
 def _run_save_sync(
     backend: SaveBackend,
     state: LibraryState,
     state_path,
+    *,
+    rom: RomState | None = None,
 ) -> None:
     """Run save sync and print a summary block in the existing layout."""
     label = "RetroArch" if isinstance(backend, RetroArchSaveBackend) else "Dolphin"
     click.echo("")
-    click.echo(f"Syncing {label} saves…")
-    result = backend.sync(state)
+    if rom is not None:
+        click.echo(f"Syncing {label} saves for {rom.name}…")
+        result = backend.sync_for_rom(rom, state)
+    else:
+        click.echo(f"Syncing {label} saves…")
+        result = backend.sync(state)
     if result.updated_roms:
-        for rom_id, rom in result.updated_roms.items():
-            state.roms[rom_id] = rom
+        for rom_id, updated_rom in result.updated_roms.items():
+            state.roms[rom_id] = updated_rom
         save_state(state, state_path)
     _print_save_sync_summary(result, label=label)
 
