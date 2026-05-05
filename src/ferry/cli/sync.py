@@ -406,7 +406,10 @@ def _print_planned_actions(
     click.echo(f"{title} ({len(items)}):")
     shown = items if cap is None else items[:cap]
     for a in shown:
-        click.echo(f"    {sigil} {a.rom_name} — {a.save_filename} (slot={a.slot}, {a.reason})")
+        click.echo(
+            f"    {sigil} {a.rom_name} — {a.save_filename} "
+            f"(emulator={a.emulator}, slot={a.slot}, {a.reason})"
+        )
     if cap is not None and len(items) > cap:
         click.echo(f"    ... and {len(items) - cap} more (run with --full to list all)")
 

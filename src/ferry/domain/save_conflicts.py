@@ -88,12 +88,47 @@ def classify(
     has_server = server_md5 is not None or server_updated_at is not None
     has_prior = last_sync_md5 is not None
 
+    # Normalize None → "" for the server fields once; downstream branches
+    # consume them.
+    server_ts = server_updated_at or ""
+    s_md5 = server_md5 or ""
+
     if not has_local and not has_server:
         if has_prior:
             return Classification(action="drop_prior", reason="both sides deleted")
         return Classification(action="skip", reason="nothing to sync")
 
     if not has_local and has_server:
+        if has_prior:
+            # We've synced this server record before but the walker didn't
+            # find a local match this round. Common cause: the server
+            # holds multiple records for the same (rom_id, slot) under
+            # different emulator tags (e.g. `retroarch-snes9x` +
+            # `retroarch-bsnes` from another host with sort-by-core),
+            # while this host's content-only layout collapses everything
+            # to plain `retroarch`. The orphan keys would download to the
+            # same on-disk path that's already covered by the local key,
+            # clobbering each other every sync.
+            #
+            # Re-evaluate the orphan via prior-vs-server comparison. If
+            # the server hasn't changed since we last handled it, skip;
+            # otherwise download (the user explicitly updated it
+            # somewhere).
+            s_changed = _server_changed_against_prior(
+                last_sync_md5=last_sync_md5,
+                last_sync_server_size=last_sync_server_size,
+                last_sync_server_updated_at=last_sync_server_updated_at,
+                server_md5=s_md5,
+                server_size=server_size,
+                server_updated_at=server_ts,
+            )
+            if not s_changed:
+                return Classification(
+                    action="skip",
+                    reason="server unchanged since last sync (no local match — likely "
+                    "covered by another emulator tag)",
+                )
+            return Classification(action="download", reason="server changed since last sync")
         return Classification(action="download", reason="new server save")
 
     if has_local and not has_server:
@@ -101,8 +136,6 @@ def classify(
 
     # Both present.
     assert local_md5 is not None and local_mtime is not None
-    server_ts = server_updated_at or ""
-    s_md5 = server_md5 or ""
 
     if not has_prior:
         # First-time conflict — never synced before.
@@ -127,14 +160,14 @@ def classify(
 
     # We have a prior sync record — full diff.
     l_changed = local_changed(local_md5, last_sync_md5)
-    s_changed = server_changed_fast(
-        stored_updated_at=last_sync_server_updated_at,
-        stored_size=last_sync_server_size,
-        server_updated_at=server_ts,
+    s_changed = _server_changed_against_prior(
+        last_sync_md5=last_sync_md5,
+        last_sync_server_size=last_sync_server_size,
+        last_sync_server_updated_at=last_sync_server_updated_at,
+        server_md5=s_md5,
         server_size=server_size,
+        server_updated_at=server_ts,
     )
-    if s_changed is None:
-        s_changed = s_md5 != last_sync_md5
     action = determine_action(local_changed_=l_changed, server_changed=s_changed)
     if action == "skip":
         return Classification(action="skip", reason="unchanged since last sync")
@@ -160,6 +193,47 @@ def classify(
         ),
         conflict_resolved=True,
     )
+
+
+def _server_changed_against_prior(
+    *,
+    last_sync_md5: str | None,
+    last_sync_server_size: int | None,
+    last_sync_server_updated_at: str | None,
+    server_md5: str,
+    server_size: int | None,
+    server_updated_at: str,
+) -> bool:
+    """Has the server-side save changed since our last successful sync?
+
+    Combines `server_changed_fast`'s timestamp+size fast path with a
+    slow-path fallback that prefers content_hash but tolerates RomM's
+    `content_hash: null` configurations by falling through to size
+    comparison.
+    """
+    s_changed = server_changed_fast(
+        stored_updated_at=last_sync_server_updated_at,
+        stored_size=last_sync_server_size,
+        server_updated_at=server_updated_at,
+        server_size=server_size,
+    )
+    if s_changed is not None:
+        return s_changed
+    # Slow path. Prefer hashes when the server has them.
+    # When the server returns null/empty `content_hash` (RomM admins
+    # disable asset hashing in some configurations), comparing
+    # `"" != last_sync_md5` would always say "changed" and re-trigger
+    # downloads forever. Fall back to size comparison: same size +
+    # different timestamp is most likely a server-side metadata
+    # touch, not new content.
+    if server_md5:
+        return server_md5 != last_sync_md5
+    if server_size is not None and last_sync_server_size is not None:
+        return server_size != last_sync_server_size
+    # No hash, no size — genuinely indeterminate. Be conservative and
+    # treat as changed; downloading once is better than missing a real
+    # update.
+    return True
 
 
 def local_changed(local_hash: str | None, last_sync_hash: str | None) -> bool:
@@ -189,10 +263,25 @@ def server_changed_fast(
         None  — indeterminate; caller must do a slow-path hash comparison
             (timestamp differs, or no stored timestamp to compare against).
 
-    The fast path lets us skip a hash compute on the typical
-    "nothing-changed-since-last-sync" case.
+    Timestamps are compared as parsed datetimes truncated to second
+    precision, not as raw strings. RomM's upload response includes
+    microseconds (`2026-05-05T10:21:07.058332+00:00`) but the list
+    endpoint truncates them (`2026-05-05T10:21:07+00:00`); a string
+    compare would treat the same save as "changed" on the very next
+    sync. Truncating to seconds matches RomM's coarsest serialization.
     """
-    if not stored_updated_at or stored_updated_at != server_updated_at:
+    if not stored_updated_at or not server_updated_at:
+        return None
+    try:
+        stored_dt = datetime.fromisoformat(stored_updated_at.replace("Z", "+00:00")).replace(
+            microsecond=0
+        )
+        server_dt = datetime.fromisoformat(server_updated_at.replace("Z", "+00:00")).replace(
+            microsecond=0
+        )
+    except (ValueError, AttributeError):
+        return None
+    if stored_dt != server_dt:
         return None
     if stored_size is None or server_size is None:
         # Timestamps match but at least one size is unknown — assume unchanged
