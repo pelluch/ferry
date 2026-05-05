@@ -111,7 +111,7 @@ def list_local_saves(
             warnings.append(f"rom_id={rom.rom_id} ({rom.name}): ROM file not on disk at {rom_path}")
             continue
 
-        header = _resolve_header(rom_path, tool, cache)
+        header = lookup_disc_header(rom_path, tool, cache)
         if header is None:
             warnings.append(
                 f"rom_id={rom.rom_id} ({rom.name}): could not read disc header from {rom_path}"
@@ -170,12 +170,18 @@ def _gamecube_roms(roms: Iterable[RomState]) -> list[RomState]:
     ]
 
 
-def _resolve_header(
+def lookup_disc_header(
     rom_path: Path,
     tool: DolphinTool,
     cache: DiscHeaderCache | None,
 ) -> DiscHeader | None:
-    """Cache-first header lookup. Populates the cache on a fresh read."""
+    """Cache-first header lookup. Populates the cache on a fresh read.
+
+    Used by the walker (this module) and the save backend (which needs
+    the disc header again to resolve download destinations). Callers
+    expecting headers for many ROMs should pass a shared cache so the
+    walker's reads are reused.
+    """
     if cache is not None:
         cached = cache.get(rom_path)
         if cached is not None:
@@ -190,6 +196,20 @@ def _region_folder(region: str, encoding: RegionEncoding) -> str | None:
     """Map Dolphin Region enum value to the install's folder convention."""
     table = _REGION_FOLDERS_3LETTER if encoding == "3-letter" else _REGION_FOLDERS_2LETTER
     return table.get(region)
+
+
+def resolve_save_path(install: DolphinInstall, region: str, save_filename: str) -> Path | None:
+    """Where on disk Dolphin reads/writes a save with this filename.
+
+    `<saves_root>/<region_folder>/Card A/<save_filename>`, or None when
+    the region isn't in the supported set (NTSC-U / NTSC-J / PAL). The
+    save backend uses this both to compute download destinations and to
+    sanity-check upload sources are where Dolphin will read them.
+    """
+    folder = _region_folder(region, install.region_encoding)
+    if folder is None:
+        return None
+    return install.saves_root / folder / "Card A" / save_filename
 
 
 def _slot_from_filename(filename: str, prefix: str) -> str | None:

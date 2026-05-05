@@ -486,7 +486,7 @@ class RetroArchSaveBackend:
 def _index_server_saves(
     server_saves: Iterable[dict[str, Any]],
 ) -> dict[tuple[int, str, str], dict[str, Any]]:
-    """Group raw server save dicts by (rom_id, emulator, slot).
+    """Group raw server save dicts by (rom_id, emulator, slot), retroarch-only.
 
     RomM accumulates saves per slot — every upload appends a `[datetime]`
     suffix to the filename and creates a new record (`_apply_datetime_tag`
@@ -495,6 +495,10 @@ def _index_server_saves(
     timestamped versions are previous backups the user can recover via the
     web UI but aren't ferry's concern. PUT to the chosen save's id on the
     next upload keeps the chain in place rather than spawning new entries.
+
+    Saves with non-retroarch emulator labels (e.g. v3's `"dolphin"`) are
+    skipped — those belong to a different SaveBackend and would only
+    produce spurious "cannot determine local path" failures here.
 
     `slot` is normalized: None or "" → "default" so the key matches what
     the local walker emits.
@@ -506,6 +510,8 @@ def _index_server_saves(
         slot = save.get("slot") or _DEFAULT_SLOT
         if not isinstance(rom_id, int) or not isinstance(emulator, str):
             continue  # malformed; skip
+        if not emulator.startswith("retroarch"):
+            continue  # belongs to another backend
         key = (rom_id, emulator, slot)
         existing = out.get(key)
         if existing is None or _updated_after(save, existing):
@@ -527,8 +533,18 @@ def _updated_after(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 
 def _index_prior_records(roms: Iterable[RomState]) -> dict[tuple[int, str, str], SaveRecord]:
-    """Index the prior SaveRecords across all ROMs by (rom_id, emulator, slot)."""
-    return {(rom.rom_id, sr.emulator, sr.slot): sr for rom in roms for sr in rom.saves}
+    """Index retroarch SaveRecords across all ROMs by (rom_id, emulator, slot).
+
+    Filters to retroarch-tagged records — non-retroarch ones (v3's
+    `"dolphin"`) are managed by other backends and would otherwise
+    appear as spurious "drop_prior" candidates here.
+    """
+    return {
+        (rom.rom_id, sr.emulator, sr.slot): sr
+        for rom in roms
+        for sr in rom.saves
+        if sr.emulator.startswith("retroarch")
+    }
 
 
 def _save_record_from_server(server: dict[str, Any], *, local_md5: str) -> SaveRecord | None:
