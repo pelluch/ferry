@@ -753,9 +753,11 @@ def test_sync_skips_save_sync_when_no_retroarch_install(tmp_path: Path, monkeypa
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "sync"], env={})
     assert result.exit_code == 0, result.output
-    assert "save sync skipped" in result.output
-    assert "no RetroArch install detected" in result.output
-    assert "Save sync:" not in result.output
+    assert "save sync (RetroArch) skipped" in result.output
+    assert "no install detected" in result.output
+    # No backend's save sync ran (no RA, no Dolphin).
+    assert "Syncing RetroArch saves" not in result.output
+    assert "Syncing Dolphin saves" not in result.output
 
 
 @respx.mock
@@ -801,8 +803,8 @@ def test_sync_runs_save_sync_after_library_sync(tmp_path: Path, monkeypatch) -> 
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "sync"], env={})
     assert result.exit_code == 0, result.output
-    assert "Syncing saves" in result.output
-    assert "Save sync:" in result.output
+    assert "Syncing RetroArch saves" in result.output
+    assert "RetroArch save sync:" in result.output
     assert "Uploaded:   0" in result.output
     assert "Downloaded: 0" in result.output
 
@@ -820,7 +822,7 @@ def test_dry_run_shows_save_sync_preview(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
     assert result.exit_code == 0, result.output
-    assert "Save sync: would target native" in result.output
+    assert "Save sync (RetroArch): would target native" in result.output
 
 
 @respx.mock
@@ -834,8 +836,8 @@ def test_dry_run_save_preview_reports_skip_when_no_install(tmp_path: Path, monke
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
     assert result.exit_code == 0, result.output
-    assert "Save sync: would skip" in result.output
-    assert "no RetroArch" in result.output
+    assert "Save sync (RetroArch): would skip" in result.output
+    assert "no install detected" in result.output
 
 
 @respx.mock
