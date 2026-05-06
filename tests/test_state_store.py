@@ -101,7 +101,7 @@ def test_save_overwrites_previous_state(tmp_path: Path, make_rom) -> None:
 
 
 def test_recovery_returns_empty_state_when_no_sidecars(tmp_path: Path) -> None:
-    state = recover_state_from_sidecars([tmp_path])
+    state = recover_state_from_sidecars(tmp_path)
     assert state.roms == {}
 
 
@@ -109,29 +109,47 @@ def test_recovery_finds_sidecars_under_roots(tmp_path: Path, make_rom) -> None:
     roms_base = tmp_path / "ROMs"
     a = roms_base / "gc" / "A.iso"
     b = roms_base / "snes" / "B.smc"
-    write_sidecar(a, make_rom(rom_id=1, name="A"))
-    write_sidecar(b, make_rom(rom_id=2, name="B"))
+    write_sidecar(a, make_rom(rom_id=1, name="A"), roms_base=roms_base)
+    write_sidecar(b, make_rom(rom_id=2, name="B"), roms_base=roms_base)
 
-    recovered = recover_state_from_sidecars([roms_base])
+    recovered = recover_state_from_sidecars(roms_base)
     assert set(recovered.roms) == {1, 2}
     assert recovered.roms[1].name == "A"
     assert recovered.roms[2].name == "B"
 
 
+def test_recovery_picks_up_legacy_sidecars_in_rom_tree(tmp_path: Path, make_rom) -> None:
+    """Pre-relocation v2 sidecars next-to-rom are still surfaced for recovery."""
+    from ferry.adapters.sidecar import legacy_sidecar_paths_for
+    from ferry.domain.state import rom_to_json
+
+    roms_base = tmp_path / "ROMs"
+    primary = roms_base / "gc" / "Legacy.iso"
+    primary.parent.mkdir(parents=True)
+    dot, _plain = legacy_sidecar_paths_for(primary)
+    dot.write_text(rom_to_json(make_rom(rom_id=99, name="Legacy")))
+
+    recovered = recover_state_from_sidecars(roms_base)
+    assert set(recovered.roms) == {99}
+
+
 def test_recovery_skips_malformed_sidecars(tmp_path: Path, make_rom) -> None:
     roms_base = tmp_path / "ROMs"
     good = roms_base / "gc" / "Good.iso"
-    write_sidecar(good, make_rom(rom_id=42))
-    # Drop a corrupt sidecar nearby.
-    bad_dir = roms_base / "gc"
-    (bad_dir / "Bad.iso.ferry.json").write_text("{ not json")
+    write_sidecar(good, make_rom(rom_id=42), roms_base=roms_base)
+    # Drop a corrupt sidecar in a place find_sidecars walks.
+    from ferry.adapters.sidecar import default_sidecars_root
 
-    recovered = recover_state_from_sidecars([roms_base])
+    bad = default_sidecars_root() / "gc" / "Bad.iso.ferry.json"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("{ not json")
+
+    recovered = recover_state_from_sidecars(roms_base)
     assert set(recovered.roms) == {42}  # corrupt one skipped, not raised
 
 
 def test_recovery_returns_empty_when_root_does_not_exist(tmp_path: Path) -> None:
-    recovered = recover_state_from_sidecars([tmp_path / "nope"])
+    recovered = recover_state_from_sidecars(tmp_path / "nope")
     assert recovered.roms == {}
 
 
@@ -154,11 +172,11 @@ def test_ensure_sidecars_regenerates_missing(tmp_path: Path, make_rom) -> None:
     state = LibraryState(roms={1: rom})
 
     # No sidecar yet.
-    assert not sidecar_path_for(primary).exists()
+    assert not sidecar_path_for(primary, roms_base=dest.roms_base).exists()
 
     count = ensure_sidecars(state, dest)
     assert count == 1
-    assert sidecar_path_for(primary).exists()
+    assert sidecar_path_for(primary, roms_base=dest.roms_base).exists()
 
 
 def test_ensure_sidecars_skips_existing(tmp_path: Path, make_rom) -> None:
@@ -167,7 +185,7 @@ def test_ensure_sidecars_skips_existing(tmp_path: Path, make_rom) -> None:
     primary.parent.mkdir(parents=True)
     primary.write_bytes(b"data")
     rom = make_rom(rom_id=1)
-    write_sidecar(primary, rom)  # already there
+    write_sidecar(primary, rom, roms_base=dest.roms_base)  # already there
     state = LibraryState(roms={1: rom})
 
     count = ensure_sidecars(state, dest)
@@ -184,4 +202,7 @@ def test_ensure_sidecars_skips_when_primary_missing(tmp_path: Path, make_rom) ->
     count = ensure_sidecars(state, dest)
     assert count == 0
     # Sidecar deliberately not written — it would be at a phantom path.
-    assert not sidecar_path_for(dest.roms_base / rom.primary_output.path).exists()
+    primary_abs = dest.roms_base / rom.primary_output.path
+    # roms_base may not exist on disk yet; explicitly compute path without relying on it.
+    canonical = sidecar_path_for(primary_abs, roms_base=dest.roms_base)
+    assert not canonical.exists()

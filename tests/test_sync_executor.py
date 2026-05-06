@@ -144,8 +144,8 @@ def test_add_action_with_unzip_extracts_and_records_state(tmp_path: Path) -> Non
     assert saved.outputs[0].size == 9
     assert saved.primary_output_index == 0
 
-    # Sidecar written next to the primary.
-    sidecar = sidecar_path_for(tmp_path / "ROMs" / "gc" / "Game.iso")
+    # Sidecar written under the canonical sidecars root.
+    sidecar = sidecar_path_for(tmp_path / "ROMs" / "gc" / "Game.iso", roms_base=tmp_path / "ROMs")
     assert sidecar.exists()
 
 
@@ -242,7 +242,7 @@ def test_multi_output_zip_picks_cue_as_primary(tmp_path: Path) -> None:
     assert primary.path.endswith(".cue")
     # Sidecar is at the primary, not at the bins.
     primary_abs = tmp_path / "ROMs" / "psx" / Path(primary.path).name
-    assert sidecar_path_for(primary_abs).exists()
+    assert sidecar_path_for(primary_abs, roms_base=tmp_path / "ROMs").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +261,8 @@ def test_update_action_cleans_up_old_outputs_with_changed_filename(
     gc_dir.mkdir(parents=True)
     old_iso = gc_dir / "Game v1.iso"
     old_iso.write_bytes(b"old-bytes")
-    old_sidecar = sidecar_path_for(old_iso)
+    old_sidecar = sidecar_path_for(old_iso, roms_base=tmp_path / "ROMs")
+    old_sidecar.parent.mkdir(parents=True, exist_ok=True)
     old_sidecar.write_text("{}")  # placeholder content
 
     previous = make_rom(
@@ -331,7 +332,7 @@ def test_update_action_cleans_up_old_outputs_with_changed_filename(
     # Old sidecar removed.
     assert not old_sidecar.exists()
     # New sidecar written.
-    assert sidecar_path_for(gc_dir / "Game v2.iso").exists()
+    assert sidecar_path_for(gc_dir / "Game v2.iso", roms_base=tmp_path / "ROMs").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +459,7 @@ def test_delete_action_moves_outputs_and_sidecar_to_trash(tmp_path: Path, make_r
     rom = make_rom(rom_id=5, name="Pikmin")
     from ferry.adapters.sidecar import sidecar_path_for, write_sidecar
 
-    write_sidecar(primary, rom)
+    write_sidecar(primary, rom, roms_base=tmp_path / "ROMs")
 
     state = LibraryState(roms={5: rom})
     state_path = tmp_path / "state.json"
@@ -494,11 +495,13 @@ def test_delete_action_moves_outputs_and_sidecar_to_trash(tmp_path: Path, make_r
     assert len(result.deleted) == 1
     assert result.deleted[0].rom_id == 5
 
-    # Files are gone from roms_base.
+    # Files are gone — both the ROM file and the canonical sidecar.
     assert not primary.exists()
-    assert not sidecar_path_for(primary).exists()
+    assert not sidecar_path_for(primary, roms_base=tmp_path / "ROMs").exists()
 
-    # Files are in the trash, with the gc/ subdir preserved.
+    # Files are in the trash, with the gc/ subdir preserved. Sidecar uses
+    # the v2 dot-prefixed legacy layout so manual `mv <trash>/* ~/ROMs/`
+    # restores it to a legacy fallback path read_sidecar still picks up.
     trash_dir = result.deleted[0].trash_dir
     assert (trash_dir / "gc" / "Pikmin.iso").read_bytes() == b"iso-bytes"
     assert (trash_dir / "gc" / ".Pikmin.iso.ferry.json").exists()

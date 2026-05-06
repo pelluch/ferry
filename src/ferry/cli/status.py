@@ -323,7 +323,7 @@ def _print_reconcile(state: LibraryState, config: Config) -> None:
             primary_abs = roms_base / rom.primary_output.path
             if not primary_abs.exists():
                 missing_primary += 1
-            elif not sidecar_path_for(primary_abs).exists():
+            elif not sidecar_path_for(primary_abs, roms_base=roms_base).exists():
                 missing_sidecar += 1
         total_missing_primary += missing_primary
         total_missing_sidecar += missing_sidecar

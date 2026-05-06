@@ -34,7 +34,7 @@ def default_trash_root(env: Mapping[str, str] | None = None) -> Path:
 
 
 def trash_paths(
-    paths: list[Path],
+    paths: list[Path | tuple[Path, Path]],
     rom_id: int,
     *,
     trash_root: Path,
@@ -43,9 +43,16 @@ def trash_paths(
 ) -> Path:
     """Move *paths* into a fresh timestamped trash dir keyed by *rom_id*.
 
-    Each path's location relative to *roms_base* is preserved, so the
-    on-disk layout under the trash dir mirrors the original layout under
-    `roms_base/`. Paths that don't exist are skipped silently.
+    Each entry is one of:
+      - `Path`: relative path within the trash dir is computed against
+        *roms_base*; falls back to the bare filename when the path
+        isn't under roms_base.
+      - `(source, rel)` tuple: *rel* is used directly as the
+        trash-dir-relative path. Used to trash files that live outside
+        roms_base (e.g. sidecars) but should sit at a known location
+        inside the trash dir for manual restore.
+
+    Paths that don't exist are skipped silently.
 
     Returns the trash dir created (always; even if every path was missing
     on disk so the dir ends up empty — caller may inspect or rmdir).
@@ -59,15 +66,20 @@ def trash_paths(
         counter += 1
     target_dir.mkdir(parents=True)
 
-    for src in paths:
+    for entry in paths:
+        if isinstance(entry, tuple):
+            src, rel = entry
+        else:
+            src = entry
+            try:
+                rel = src.relative_to(roms_base)
+            except ValueError:
+                # Not under roms_base — fall back to a flat location with
+                # the filename. (Sidecar callers should pass tuples to get
+                # layout-preserving placement.)
+                rel = Path(src.name)
         if not src.exists():
             continue
-        try:
-            rel = src.relative_to(roms_base)
-        except ValueError:
-            # Not under roms_base — fall back to a flat location with the
-            # filename, prefixed with a sanitized parent to reduce collisions.
-            rel = Path(src.name)
         dst = target_dir / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))

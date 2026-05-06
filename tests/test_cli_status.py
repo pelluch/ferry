@@ -69,7 +69,7 @@ def test_status_with_populated_state_all_present(tmp_path: Path, monkeypatch) ->
         primary = roms_base / rom.primary_output.path
         primary.parent.mkdir(parents=True, exist_ok=True)
         primary.write_bytes(b"x")
-        write_sidecar(primary, rom)
+        write_sidecar(primary, rom, roms_base=roms_base)
 
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "status"], env={})

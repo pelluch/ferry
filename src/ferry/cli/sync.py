@@ -28,7 +28,11 @@ from ferry.adapters.romm import (
     RommForbiddenError,
     RommHttpAdapter,
 )
-from ferry.adapters.sidecar import read_sidecar
+from ferry.adapters.sidecar import (
+    default_sidecars_root,
+    migrate_legacy_sidecars,
+    read_sidecar,
+)
 from ferry.adapters.state_store import (
     default_state_path,
     ensure_sidecars,
@@ -185,8 +189,14 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
 
             state_path = default_state_path()
             state = load_state(state_path)
+            if config.destination is not None:
+                migrated = migrate_legacy_sidecars(roms_base=config.destination.roms_base)
+                if migrated:
+                    click.echo(
+                        f"migrated {migrated} legacy sidecar(s) to {default_sidecars_root()}"
+                    )
             if not state.roms and config.destination is not None:
-                recovered = recover_state_from_sidecars([config.destination.roms_base])
+                recovered = recover_state_from_sidecars(config.destination.roms_base)
                 if recovered.roms:
                     click.echo(f"recovered {len(recovered.roms)} ROM(s) from on-disk sidecars")
                     state = recovered
@@ -291,7 +301,8 @@ def _run_saves_only(
 
     rom: RomState | None = None
     if rom_path is not None:
-        rom = _find_rom_by_path(state, rom_path)
+        roms_base = config.destination.roms_base if config.destination is not None else None
+        rom = _find_rom_by_path(state, rom_path, roms_base=roms_base)
         if rom is None:
             raise click.ClickException(
                 f"ROM at {rom_path} isn't tracked by ferry — no sidecar found at "
@@ -351,13 +362,18 @@ def _warn_on_launch_hook_upstream_drift() -> None:
     )
 
 
-def _find_rom_by_path(state: LibraryState, rom_path: Path) -> RomState | None:
+def _find_rom_by_path(
+    state: LibraryState, rom_path: Path, *, roms_base: Path | None
+) -> RomState | None:
     """Resolve a ROM file path to its RomState via sidecar lookup.
 
     Returns None when no sidecar exists at the path or the rom_id from
     the sidecar isn't in state. The caller surfaces a friendly error.
+
+    `roms_base=None` is tolerated so the launch hook flow can still find
+    legacy next-to-rom sidecars when no destination is configured.
     """
-    sidecar_rom = read_sidecar(rom_path)
+    sidecar_rom = read_sidecar(rom_path, roms_base=roms_base)
     if sidecar_rom is None:
         return None
     return state.roms.get(sidecar_rom.rom_id)

@@ -6,8 +6,10 @@ file doesn't exist; writes are atomic (temp + fsync + rename).
 
 When state.json is missing or empty but the user still has ROM files +
 sidecars on disk (DESIGN.md §5.5), `recover_state_from_sidecars` rebuilds
-the state by walking the ROM tree — that's the recovery path for "user
-deleted state.json but kept everything else."
+state by walking the sidecar tree — that's the recovery path for "user
+deleted state.json but kept everything else." Sidecars live under
+`$XDG_STATE_HOME/ferry/sidecars/` (post v8 ck4); the recovery walker
+also picks up legacy next-to-rom sidecars from earlier ferry versions.
 """
 
 import logging
@@ -99,15 +101,16 @@ def ensure_sidecars(state: LibraryState, destination: Destination) -> int:
         primary_abs = destination.roms_base / rom.primary_output.path
         if not primary_abs.exists():
             continue
-        if sidecar_path_for(primary_abs).exists():
+        if sidecar_path_for(primary_abs, roms_base=destination.roms_base).exists():
             continue
-        write_sidecar(primary_abs, rom)
+        write_sidecar(primary_abs, rom, roms_base=destination.roms_base)
         regenerated += 1
     return regenerated
 
 
-def recover_state_from_sidecars(roots: list[Path]) -> LibraryState:
-    """Walk *roots* for `*.ferry.json` sidecars and rebuild a LibraryState.
+def recover_state_from_sidecars(roms_base: Path) -> LibraryState:
+    """Walk for `*.ferry.json` sidecars under both the canonical sidecars
+    root and `roms_base` (legacy fallback), and rebuild a LibraryState.
 
     Sidecars carry the same RomState as state.json's entries (DESIGN.md
     §5.5), so recovery is a straight read of each sidecar. Sidecars that
@@ -118,7 +121,7 @@ def recover_state_from_sidecars(roots: list[Path]) -> LibraryState:
     can treat the "nothing to recover" case the same as a fresh first run.
     """
     recovered: dict[int, object] = {}
-    for sidecar_path in find_sidecars(roots):
+    for sidecar_path in find_sidecars(roms_base=roms_base):
         try:
             rom = rom_from_json(sidecar_path.read_text())
         except StateDecodeError as e:
