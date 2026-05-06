@@ -462,10 +462,57 @@ def test_classify_stem_match_with_hash_match_is_confident(tmp_path: Path) -> Non
     assert result.local_md5 == md5
 
 
+def test_classify_full_name_match_without_hash_match_is_name_only(tmp_path: Path) -> None:
+    """Full filename matches server but hash doesn't (different revision)."""
+    roms_base = tmp_path / "ROMs"
+    target = roms_base / "gba" / "Pikmin.gba"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"local revision")
+
+    rom = _rom_payload(
+        1,
+        "Pikmin",
+        fs_name="Pikmin.gba",
+        files=[_file_payload(10, "Pikmin.gba", md5="ff" * 16)],
+    )
+    by_name, by_hash, by_stem = build_index([rom])
+    result = classify(_orphan(target, roms_base=roms_base), by_name, by_hash, by_stem)
+    assert isinstance(result, NameOnly)
+    assert result.candidates[0].rom_id == 1
+
+
+def test_classify_name_only_with_multiple_rom_ids(tmp_path: Path) -> None:
+    """Same filename appears across multiple distinct rom_ids (different
+    revisions of the same game) and bytes don't match any of them. Stays
+    in NameOnly with multi-rom_id candidates — caller checks the
+    candidate set to decide whether to adopt (single rom_id only)."""
+    roms_base = tmp_path / "ROMs"
+    target = roms_base / "gba" / "Game.gba"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"local")
+
+    rom_a = _rom_payload(
+        1,
+        "Game (USA)",
+        fs_name="Game.gba",
+        files=[_file_payload(10, "Game.gba", md5="aa" * 16)],
+    )
+    rom_b = _rom_payload(
+        2,
+        "Game (EUR)",
+        fs_name="Game.gba",
+        files=[_file_payload(20, "Game.gba", md5="bb" * 16)],
+    )
+    by_name, by_hash, by_stem = build_index([rom_a, rom_b])
+    result = classify(_orphan(target, roms_base=roms_base), by_name, by_hash, by_stem)
+    assert isinstance(result, NameOnly)
+    assert {c.rom_id for c in result.candidates} == {1, 2}
+
+
 def test_classify_stem_match_without_hash_match_is_name_only(tmp_path: Path) -> None:
-    """Stem matches but hash doesn't — should NOT promote to Confident.
-    Falls through to NameOnly (via the orphan having a different
-    revision/region of the same name)."""
+    """Stem matches but hash doesn't — surfaces as NameOnly (ck3
+    behavior). User can opt-in via `--include-name-only` to adopt
+    when the rom_id is unambiguous."""
     roms_base = tmp_path / "ROMs"
     target = roms_base / "gc" / "Game.iso"
     target.parent.mkdir(parents=True)
@@ -486,11 +533,9 @@ def test_classify_stem_match_without_hash_match_is_name_only(tmp_path: Path) -> 
         by_stem,
     )
     # by_stem has `Game` → server's `Game.zip`. Stem matches but hash
-    # differs — so the stem-match upgrade doesn't fire. The orphan's
-    # full filename `Game.iso` doesn't appear in by_name. Result:
-    # neither name nor hash match → NoMatch (not NameOnly, since
-    # NameOnly requires the FULL filename to be in by_name).
-    assert isinstance(result, NoMatch)
+    # differs — name-equivalence via stem fires NameOnly.
+    assert isinstance(result, NameOnly)
+    assert result.candidates[0].rom_id == 1
 
 
 def test_classify_different_stem_same_hash_stays_hash_only(tmp_path: Path) -> None:

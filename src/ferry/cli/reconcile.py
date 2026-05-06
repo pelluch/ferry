@@ -58,6 +58,7 @@ from ferry.services.reconcile import (
     classify,
     find_orphans,
     synthesize_state,
+    synthesize_state_from_match,
 )
 from ferry.services.sync_lock import LockHeld, acquire_sync_lock, default_lock_path
 
@@ -77,8 +78,23 @@ logger = logging.getLogger(__name__)
     default=None,
     help="Scope the walk to a single RomM platform slug (e.g., `gba`, `gc`).",
 )
+@click.option(
+    "--include-name-only",
+    is_flag=True,
+    help=(
+        "Also adopt orphans whose filename (or stem) matches RomM but whose "
+        "bytes don't (different revision/region, post-`extract_xiso` Xbox). "
+        "Only single-rom_id matches are adopted; multiple-rom_id matches "
+        "remain unadopted."
+    ),
+)
 @click.pass_context
-def reconcile(ctx: click.Context, dry_run: bool, platform_slug: str | None) -> None:
+def reconcile(
+    ctx: click.Context,
+    dry_run: bool,
+    platform_slug: str | None,
+    include_name_only: bool,
+) -> None:
     """Adopt orphan ROM files: name+hash-match them against RomM, write sidecars."""
     try:
         loaded = load_config(ctx.obj.get("config_path"))
@@ -93,14 +109,25 @@ def reconcile(ctx: click.Context, dry_run: bool, platform_slug: str | None) -> N
 
     try:
         with acquire_sync_lock(default_lock_path()):
-            _run_reconcile(config, dry_run=dry_run, platform_slug=platform_slug)
+            _run_reconcile(
+                config,
+                dry_run=dry_run,
+                platform_slug=platform_slug,
+                include_name_only=include_name_only,
+            )
     except LockHeld as e:
         raise click.ClickException(
             f"another ferry sync is already running (pid {e.pid}, lock at {e.lock_path})."
         ) from e
 
 
-def _run_reconcile(config: Config, *, dry_run: bool, platform_slug: str | None) -> None:
+def _run_reconcile(
+    config: Config,
+    *,
+    dry_run: bool,
+    platform_slug: str | None,
+    include_name_only: bool,
+) -> None:
     assert config.destination is not None
     roms_base = config.destination.roms_base
     sidecars_root = default_sidecars_root()
@@ -167,12 +194,19 @@ def _run_reconcile(config: Config, *, dry_run: bool, platform_slug: str | None) 
     hash_only = [c for c in classifications if isinstance(c, HashOnly)]
     no_match = [c for c in classifications if isinstance(c, NoMatch)]
 
+    # Split NameOnly by adoptability: single-rom_id matches are adoptable
+    # via --include-name-only; multi-rom_id matches remain ambiguous.
+    name_only_singular = [c for c in name_only if _name_only_rom_id(c) is not None]
+    name_only_ambig = [c for c in name_only if _name_only_rom_id(c) is None]
+
     _print_summary(
         confident=confident,
         ambiguous=ambiguous,
-        name_only=name_only,
+        name_only_singular=name_only_singular,
+        name_only_ambig=name_only_ambig,
         hash_only=hash_only,
         no_match=no_match,
+        include_name_only=include_name_only,
     )
 
     if dry_run:
@@ -180,14 +214,43 @@ def _run_reconcile(config: Config, *, dry_run: bool, platform_slug: str | None) 
         click.echo("(dry run — no sidecars or state written)")
         return
 
-    if not confident:
+    will_adopt_name_only = include_name_only and name_only_singular
+    if not confident and not will_adopt_name_only:
         click.echo("")
-        click.echo("Nothing to adopt — no confident matches.")
+        if name_only_singular:
+            click.echo(
+                "Nothing to adopt — confident matches are zero. "
+                f"{len(name_only_singular)} name-only match(es) available; "
+                "pass --include-name-only to adopt them."
+            )
+        else:
+            click.echo("Nothing to adopt — no confident matches.")
         return
 
-    adopted = _adopt_confident(confident, config=config, state=state, state_path=state_path)
+    adopted_confident = _adopt_confident(
+        confident, config=config, state=state, state_path=state_path
+    )
+    adopted_name_only = 0
+    if will_adopt_name_only:
+        adopted_name_only = _adopt_name_only(
+            name_only_singular, config=config, state=state, state_path=state_path
+        )
+
     click.echo("")
-    click.echo(f"Adopted {adopted} ROM(s). Wrote sidecars + state.json entries.")
+    if adopted_name_only:
+        click.echo(
+            f"Adopted {adopted_confident} confident + {adopted_name_only} name-only "
+            f"ROM(s). Wrote sidecars + state.json entries."
+        )
+    else:
+        click.echo(f"Adopted {adopted_confident} ROM(s). Wrote sidecars + state.json entries.")
+
+
+def _name_only_rom_id(name_only: NameOnly) -> int | None:
+    """Return the single rom_id for a NameOnly with one candidate rom_id,
+    or None if the candidates span multiple rom_ids (ambiguous)."""
+    rom_ids = {c.rom_id for c in name_only.candidates}
+    return next(iter(rom_ids)) if len(rom_ids) == 1 else None
 
 
 def _classify_all_orphans(
@@ -262,6 +325,39 @@ def _adopt_confident(
     return adopted
 
 
+def _adopt_name_only(
+    name_only_singular: list[NameOnly],
+    *,
+    config: Config,
+    state: LibraryState,
+    state_path: Path,
+) -> int:
+    """Write sidecar + state.json entry for each single-rom_id NameOnly match.
+
+    Synthesis stores `output.md5` from the local file's bytes (which by
+    definition don't match the server's md5 for this category) and
+    `source_md5` from the server. The planner uses `source_updated_at`
+    for change detection, so a future RomM update will trigger a real
+    sync that overwrites this name-only adoption with server bytes —
+    which is the right behaviour: name-only is "trust me, this is the
+    right rom" until a real update arrives.
+    """
+    assert config.destination is not None
+    roms_base = config.destination.roms_base
+    adopted = 0
+    for n in name_only_singular:
+        # _name_only_rom_id confirmed single rom_id; pick the first match.
+        match = n.candidates[0]
+        transforms = config.transforms.for_platform(match.rom_data.get("platform_slug") or "")
+        rom_state = synthesize_state_from_match(n.orphan, match, transforms_for_platform=transforms)
+        write_sidecar(n.orphan.abs_path, rom_state, roms_base=roms_base)
+        state.roms[rom_state.rom_id] = rom_state
+        adopted += 1
+    if adopted:
+        save_state(state, state_path)
+    return adopted
+
+
 # ---------------------------------------------------------------------------
 # Output rendering
 # ---------------------------------------------------------------------------
@@ -273,17 +369,30 @@ def _print_summary(
     *,
     confident: list[Confident],
     ambiguous: list[Ambiguous],
-    name_only: list[NameOnly],
+    name_only_singular: list[NameOnly],
+    name_only_ambig: list[NameOnly],
     hash_only: list[HashOnly],
     no_match: list[NoMatch],
+    include_name_only: bool,
 ) -> None:
     click.echo("")
     click.echo("Reconcile classification:")
-    click.echo(f"  Confident:  {len(confident)} (name + hash both match — would adopt)")
-    click.echo(f"  Name-only:  {len(name_only)} (filename matches; hash differs)")
-    click.echo(f"  Hash-only:  {len(hash_only)} (hash matches; renamed locally)")
-    click.echo(f"  Ambiguous:  {len(ambiguous)} (multiple RomM rom_ids match — skipped)")
-    click.echo(f"  No match:   {len(no_match)} (not in RomM)")
+    click.echo(f"  Confident:       {len(confident)} (name + hash both match — would adopt)")
+    name_only_action = "would adopt" if include_name_only else "pass --include-name-only to adopt"
+    click.echo(
+        f"  Name-only:       {len(name_only_singular)} "
+        f"(filename matches; hash differs — {name_only_action})"
+    )
+    click.echo(
+        f"  Name-only ambig: {len(name_only_ambig)} "
+        "(name matches multiple RomM rom_ids — skipped even with --include-name-only)"
+    )
+    click.echo(
+        f"  Hash-only:       {len(hash_only)} "
+        "(hash matches; renamed locally — never auto-adopted; see DESIGN.md §7 v9+)"
+    )
+    click.echo(f"  Ambiguous:       {len(ambiguous)} (multiple RomM rom_ids match — skipped)")
+    click.echo(f"  No match:        {len(no_match)} (not in RomM)")
 
     if confident:
         click.echo("")
@@ -294,22 +403,36 @@ def _print_summary(
         if len(confident) > _PREVIEW_CAP:
             click.echo(f"  ... and {len(confident) - _PREVIEW_CAP} more")
 
-    if name_only:
+    if name_only_singular:
         click.echo("")
-        click.echo(f"Name-only matches ({len(name_only)}) — pass --include-name-only to adopt:")
-        for c in name_only[:_PREVIEW_CAP]:
+        sigil = "✓" if include_name_only else "?"
+        click.echo(f"Name-only matches ({len(name_only_singular)}):")
+        for c in name_only_singular[:_PREVIEW_CAP]:
             click.echo(
-                f"  ? {c.orphan.rel_path} → matches name of "
+                f"  {sigil} {c.orphan.rel_path} → matches name of "
                 f"{c.candidates[0].rom_name} (rom_id={c.candidates[0].rom_id}) "
-                f"but local hash {c.local_md5 or '(unhashable)'} != "
-                f"server md5"
+                f"but local hash {c.local_md5 or '(unhashable)'} != server md5"
             )
-        if len(name_only) > _PREVIEW_CAP:
-            click.echo(f"  ... and {len(name_only) - _PREVIEW_CAP} more")
+        if len(name_only_singular) > _PREVIEW_CAP:
+            click.echo(f"  ... and {len(name_only_singular) - _PREVIEW_CAP} more")
+
+    if name_only_ambig:
+        click.echo("")
+        click.echo(
+            f"Name-only ambiguous ({len(name_only_ambig)}) — name matches multiple RomM rom_ids:"
+        )
+        for c in name_only_ambig[:_PREVIEW_CAP]:
+            ids = sorted({m.rom_id for m in c.candidates})
+            click.echo(f"  ⚠ {c.orphan.rel_path} → rom_ids {ids}")
+        if len(name_only_ambig) > _PREVIEW_CAP:
+            click.echo(f"  ... and {len(name_only_ambig) - _PREVIEW_CAP} more")
 
     if hash_only:
         click.echo("")
-        click.echo(f"Hash-only matches ({len(hash_only)}) — pass --include-renames to adopt:")
+        click.echo(
+            f"Hash-only matches ({len(hash_only)}) — bytes match RomM but "
+            "filename differs (locally renamed):"
+        )
         for c in hash_only[:_PREVIEW_CAP]:
             click.echo(
                 f"  ↻ {c.orphan.rel_path} → matches hash of "

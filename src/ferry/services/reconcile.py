@@ -250,60 +250,73 @@ def classify(
     see `adapters/orphan_hash.py:hash_orphan_file`. For non-archive
     files this collapses to a direct md5.
 
-    Confident matches require BOTH name and hash to agree. Two name-
-    equality flavours count:
-      1. Full filename equality (the pass-through case — cartridge
-         `.gba` → server `.gba`).
-      2. Stem-equality when full filenames differ (the unzip case —
-         local `Game.iso` matches server `Game.zip` because RomM's
-         hash is over the `.zip`'s largest inner file, which is the
-         `.iso` we have on disk). Stem-match only fires when the hash
-         matches too — never on name alone — so it can't promote a
-         genuinely-different file into Confident.
+    **Name-equivalence** is the union of two relations:
+      1. Full filename equality (`Game.gba` ↔ `Game.gba`) — the
+         pass-through case.
+      2. Stem equality (`Game.rvz` ↔ `Game.zip`) — the unzipped
+         transform case. RomM hashes the zip's largest inner file,
+         which equals the local `.rvz`.
 
-    `by_stem` is optional for backward compatibility (older callers
-    that didn't compute it). When None or empty, only full-filename
-    matches contribute to Confident.
+    Both flavours feed every classification:
+      - **Confident**: name-equivalent AND hash-equal → safe adopt.
+      - **NameOnly**: name-equivalent without hash agreement
+        (different revision/region, or non-deterministic transform
+        like `extract_xiso`). Reported only; `--include-name-only`
+        opts in to adopt single-rom_id matches.
+      - **HashOnly**: hash matches but neither full-name nor stem
+        does. Indicates the user renamed the file. Always
+        reported only — see DESIGN.md §7 v9+ for why
+        `--include-renames` was rejected.
+      - **Ambiguous**: Confident match resolves to multiple
+        rom_ids.
+      - **NoMatch**: nothing.
+
+    `by_stem` is optional for backward compatibility (older
+    callers that didn't compute it). Without it, only full-name
+    matches contribute.
     """
     local_md5 = hash_orphan_file(orphan.abs_path)
     name_matches = by_name.get(orphan.abs_path.name, [])
     hash_matches = by_hash.get(local_md5, []) if local_md5 else []
+    stem_matches = (by_stem or {}).get(orphan.abs_path.stem, [])
 
     name_keys = {(m.rom_id, m.file_id) for m in name_matches}
+    stem_keys = {(m.rom_id, m.file_id) for m in stem_matches}
     hash_keys = {(m.rom_id, m.file_id) for m in hash_matches}
-    confident_keys = name_keys & hash_keys
 
-    # Stem-equivalence fallback: same stem + same hash → Confident.
-    # Covers transformed-platform adoption (unzip strips the .zip
-    # extension server-side) without ever auto-adopting a file whose
-    # bytes don't match.
-    stem_matches: list[MatchedFile] = []
-    if by_stem and not confident_keys and local_md5:
-        stem_matches = by_stem.get(orphan.abs_path.stem, [])
-        stem_keys = {(m.rom_id, m.file_id) for m in stem_matches}
-        confident_keys = stem_keys & hash_keys
+    # Name-equivalence union: full-name OR stem.
+    name_equiv_keys = name_keys | stem_keys
+    confident_keys = name_equiv_keys & hash_keys
 
     if confident_keys:
-        # Pull confidents from whichever side(s) found them so the
-        # resulting MatchedFile preserves rom_data / file_data references.
-        candidates = name_matches + stem_matches + hash_matches
-        seen: set[tuple[int, int]] = set()
-        confidents: list[MatchedFile] = []
-        for m in candidates:
-            key = (m.rom_id, m.file_id)
-            if key in confident_keys and key not in seen:
-                confidents.append(m)
-                seen.add(key)
+        confidents = _dedup_matches(confident_keys, name_matches + stem_matches + hash_matches)
         unique_rom_ids = {m.rom_id for m in confidents}
         if len(unique_rom_ids) > 1:
             return Ambiguous(orphan=orphan, matches=tuple(confidents), local_md5=local_md5 or "")
         return Confident(orphan=orphan, match=confidents[0], local_md5=local_md5 or "")
 
-    if name_matches:
-        return NameOnly(orphan=orphan, candidates=tuple(name_matches), local_md5=local_md5)
+    if name_equiv_keys:
+        # Name-equivalent candidates exist but no hash match — different
+        # bytes for the (presumably) same logical ROM. `--include-name-only`
+        # adopts single-rom_id matches; multi-rom_id stays unadopted.
+        candidates = _dedup_matches(name_equiv_keys, name_matches + stem_matches)
+        return NameOnly(orphan=orphan, candidates=tuple(candidates), local_md5=local_md5)
     if hash_matches:
         return HashOnly(orphan=orphan, candidates=tuple(hash_matches), local_md5=local_md5 or "")
     return NoMatch(orphan=orphan, local_md5=local_md5)
+
+
+def _dedup_matches(keys: set[tuple[int, int]], candidates: list[MatchedFile]) -> list[MatchedFile]:
+    """Return MatchedFiles whose (rom_id, file_id) is in `keys`, deduped
+    in source order so the first appearance wins."""
+    seen: set[tuple[int, int]] = set()
+    out: list[MatchedFile] = []
+    for m in candidates:
+        key = (m.rom_id, m.file_id)
+        if key in keys and key not in seen:
+            out.append(m)
+            seen.add(key)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -311,33 +324,37 @@ def classify(
 # ---------------------------------------------------------------------------
 
 
-def synthesize_state(
-    confident: Confident,
+def synthesize_state_from_match(
+    orphan: OrphanCandidate,
+    match: MatchedFile,
     *,
-    roms_base: Path,
     transforms_for_platform: tuple[str, ...],
     now_iso: str | None = None,
 ) -> RomState:
-    """Build a `RomState` for a confident orphan match, ready to persist.
+    """Build a `RomState` from one (orphan, MatchedFile) pair.
+
+    Used both by Confident adoption and `--include-name-only` adoption
+    (see `synthesize_state`'s wrapper).
 
     `output.md5` is the direct md5 of the local file bytes — what
     ferry's sync executor would have computed had it produced this
-    file via download+pipeline. That's distinct from `confident.local_md5`,
-    which mirrors RomM's largest-inner-file convention for archive
-    pass-throughs.
+    file via download+pipeline. For Confident matches, this equals
+    `RomFile.md5_hash` (the largest-inner-file convention agreed); for
+    NameOnly adoptions, the two diverge by definition (the user
+    accepted that bytes don't match).
 
-    `source_md5` borrows RomM's per-file `md5_hash` (same as
-    `confident.local_md5` after our match). It's not strictly the
-    "ZIP bytes md5" the planner would have computed during a real
-    download — but the planner only uses `source_updated_at` for
-    change detection, so this is fine.
+    `source_md5` borrows RomM's per-file `md5_hash` for consistency
+    with the rest of state. The planner uses `source_updated_at` (not
+    `source_md5`) for change detection, so a name-only adoption's
+    "lying" source_md5 isn't load-bearing — and an eventual server-
+    side update will refresh it on the first real sync.
     """
-    rom_data = confident.match.rom_data
-    file_data = confident.match.file_data
-    abs_path = confident.orphan.abs_path
+    rom_data = match.rom_data
+    file_data = match.file_data
+    abs_path = orphan.abs_path
     output_md5 = hash_file_bytes(abs_path)
     return RomState(
-        rom_id=confident.match.rom_id,
+        rom_id=match.rom_id,
         platform_slug=str(rom_data.get("platform_slug") or "?"),
         name=str(rom_data.get("name") or rom_data.get("fs_name") or "?"),
         source_filename=str(rom_data.get("fs_name") or ""),
@@ -347,13 +364,31 @@ def synthesize_state(
         transforms=transforms_for_platform,
         outputs=(
             TransformedOutput(
-                path=str(confident.orphan.rel_path),
+                path=str(orphan.rel_path),
                 md5=output_md5,
                 size=abs_path.stat().st_size,
             ),
         ),
         primary_output_index=0,
         synced_at=now_iso or _now_iso(),
+    )
+
+
+def synthesize_state(
+    confident: Confident,
+    *,
+    roms_base: Path,
+    transforms_for_platform: tuple[str, ...],
+    now_iso: str | None = None,
+) -> RomState:
+    """Build a `RomState` for a Confident match. Thin wrapper around
+    `synthesize_state_from_match`; preserved for backward compat with
+    callers that already hold a `Confident`."""
+    return synthesize_state_from_match(
+        confident.orphan,
+        confident.match,
+        transforms_for_platform=transforms_for_platform,
+        now_iso=now_iso,
     )
 
 

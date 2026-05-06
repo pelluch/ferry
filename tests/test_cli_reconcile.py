@@ -146,7 +146,7 @@ def test_reconcile_adopts_confident_pass_through_orphan(tmp_path: Path, monkeypa
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "reconcile"], env={})
     assert result.exit_code == 0, result.output
-    assert "Confident:  1" in result.output
+    assert "Confident:       1" in result.output
     assert "Adopted 1 ROM(s)" in result.output
 
     # Sidecar at canonical location.
@@ -187,7 +187,7 @@ def test_reconcile_dry_run_writes_nothing(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "reconcile", "--dry-run"], env={})
     assert result.exit_code == 0, result.output
-    assert "Confident:  1" in result.output
+    assert "Confident:       1" in result.output
     assert "(dry run — no sidecars or state written)" in result.output
 
     # No sidecar written.
@@ -230,8 +230,8 @@ def test_reconcile_lists_name_only_without_adopting(tmp_path: Path, monkeypatch)
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "reconcile"], env={})
     assert result.exit_code == 0, result.output
-    assert "Name-only:  1" in result.output
-    assert "Confident:  0" in result.output
+    assert "Name-only:       1" in result.output
+    assert "Confident:       0" in result.output
     assert "Adopted" not in result.output
     # Nothing written.
     assert not sidecar_path_for(target, roms_base=roms_base).exists()
@@ -252,7 +252,7 @@ def test_reconcile_lists_no_match_for_files_not_in_romm(tmp_path: Path, monkeypa
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "reconcile"], env={})
     assert result.exit_code == 0, result.output
-    assert "No match:   1" in result.output
+    assert "No match:        1" in result.output
     assert "Stranger.gba" in result.output
 
 
@@ -270,7 +270,7 @@ def test_reconcile_skips_files_without_matching_romm_platform(tmp_path: Path, mo
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "reconcile"], env={})
     assert result.exit_code == 0, result.output
-    assert "No match:   1" in result.output
+    assert "No match:        1" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +342,7 @@ def test_reconcile_adopts_multi_file_zip_via_largest_inner_hash(
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "reconcile"], env={})
     assert result.exit_code == 0, result.output
-    assert "Confident:  1" in result.output
+    assert "Confident:       1" in result.output
     assert "Adopted 1 ROM(s)" in result.output
     assert sidecar_path_for(target, roms_base=roms_base).exists()
 
@@ -380,12 +380,101 @@ def test_reconcile_adopts_unzipped_rom_via_stem_match(tmp_path: Path, monkeypatc
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "reconcile"], env={})
     assert result.exit_code == 0, result.output
-    assert "Confident:  1" in result.output
-    assert "Hash-only:  0" in result.output
+    assert "Confident:       1" in result.output
+    assert "Hash-only:       0" in result.output
     assert "Adopted 1 ROM(s)" in result.output
 
     state = load_state(default_state_path())
     assert 19412 in state.roms
+
+
+@respx.mock
+def test_reconcile_include_name_only_adopts_single_rom_id_match(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`--include-name-only` adopts orphans whose filename (or stem)
+    matches a server file but whose bytes don't, when a single rom_id
+    resolves the candidate set."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    roms_base = tmp_path / "ROMs"
+    target = roms_base / "gc" / "Game.iso"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"locally-tweaked bytes")  # different from server md5
+    cfg = _write_config(tmp_path / "config.toml", roms_base=roms_base)
+
+    _mock_platforms([_platform_payload(99, "gc")])
+    _mock_roms_for_platform(
+        99,
+        [
+            _rom_payload(
+                700,
+                "Game",
+                fs_name="Game.zip",
+                platform_slug="gc",
+                files=[_file_payload(1, "Game.zip", md5="ff" * 16)],
+            )
+        ],
+    )
+
+    runner = CliRunner()
+    # Without the flag: not adopted.
+    result = runner.invoke(app, ["--config", str(cfg), "reconcile"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Name-only:       1" in result.output
+    state = load_state(default_state_path())
+    assert 700 not in state.roms
+
+    # With the flag: adopted.
+    result = runner.invoke(app, ["--config", str(cfg), "reconcile", "--include-name-only"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Adopted 0 confident + 1 name-only" in result.output
+    state = load_state(default_state_path())
+    assert 700 in state.roms
+    canonical = sidecar_path_for(target, roms_base=roms_base)
+    assert canonical.exists()
+
+
+@respx.mock
+def test_reconcile_include_name_only_skips_multi_rom_id_match(tmp_path: Path, monkeypatch) -> None:
+    """When a name-equivalent orphan resolves to MULTIPLE distinct rom_ids,
+    --include-name-only doesn't adopt — can't pick which rom_id is right.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    roms_base = tmp_path / "ROMs"
+    target = roms_base / "gc" / "Game.iso"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"locally-tweaked")  # hash differs from BOTH servers
+    cfg = _write_config(tmp_path / "config.toml", roms_base=roms_base)
+
+    _mock_platforms([_platform_payload(99, "gc")])
+    _mock_roms_for_platform(
+        99,
+        [
+            _rom_payload(
+                700,
+                "Game (USA)",
+                fs_name="Game.zip",
+                platform_slug="gc",
+                files=[_file_payload(1, "Game.zip", md5="aa" * 16)],
+            ),
+            _rom_payload(
+                701,
+                "Game (Europe)",
+                fs_name="Game.zip",
+                platform_slug="gc",
+                files=[_file_payload(2, "Game.zip", md5="bb" * 16)],
+            ),
+        ],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "reconcile", "--include-name-only"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Name-only ambig: 1" in result.output
+    assert "Adopted" not in result.output  # neither rom_id adopted
+    state = load_state(default_state_path())
+    assert 700 not in state.roms
+    assert 701 not in state.roms
 
 
 @respx.mock
