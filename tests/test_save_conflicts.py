@@ -333,23 +333,29 @@ class TestClassifyWithPrior:
         )
         assert result.action == "skip"
 
-    def test_null_server_hash_with_size_match_treats_as_unchanged(self) -> None:
-        """When server returns `content_hash: null` AND timestamps differ
-        (so we hit the slow path), fall back to size comparison rather
-        than treating the empty hash as a mismatch (which would re-download
-        forever)."""
+    def test_null_server_hash_with_size_match_assumes_changed(self) -> None:
+        """When server exposes no `content_hash` AND timestamps differ
+        (slow path), treat as changed. Same byte-size is NOT proof of
+        equal content — many save formats have fixed sizes that don't
+        reflect their state. GameCube `.gci` files are sized by memory-
+        card blocks (a 15-block save is always 122944 bytes regardless
+        of the save's progress); RetroArch SRMs match cart SRAM
+        capacity. A size-equal-to-prior fallback would silently skip
+        legitimate cross-device save updates whenever the new save
+        happens to use the same block count.
+        """
         result = classify(
             local_md5="abc123",
             local_mtime=1746461200.0,
-            local_save_filename="x.srm",
+            local_save_filename="x.gci",
             server_md5=None,
-            server_size=1024,
+            server_size=122944,  # 15 blocks + header — same byte length, possibly different content
             server_updated_at="2027-01-01T00:00:00+00:00",  # different ts
             last_sync_md5="abc123",
-            last_sync_server_size=1024,
+            last_sync_server_size=122944,
             last_sync_server_updated_at="2026-05-05T00:00:00+00:00",
         )
-        assert result.action == "skip"
+        assert result.action == "download"
 
     def test_null_server_hash_with_size_mismatch_is_changed(self) -> None:
         """Size disagreement is real evidence of change even without a hash."""
@@ -365,6 +371,29 @@ class TestClassifyWithPrior:
             last_sync_server_updated_at="2026-05-05T00:00:00+00:00",
         )
         assert result.action == "download"
+
+    def test_eternal_darkness_regression(self) -> None:
+        """Field-reported case: GameCube .gci with identical block-count
+        size on both sides + null content_hash + timestamps differ +
+        local matches prior. With the old size-fallback this skipped;
+        with the fix it correctly downloads (server has new content
+        from another device, padded to the same 15-block layout)."""
+        # Numbers from `~/retrodeck/saves/gc/dolphin/US/Card A/01-GEDE-Eternal Darkness.gci`
+        # and the matching /api/saves response.
+        eternal_darkness_size = 15 * 8192 + 64  # 122944
+        result = classify(
+            local_md5="6425447be942f496469609c4b173cb76",
+            local_mtime=1746505461.0,
+            local_save_filename="01-GEDE-Eternal Darkness.gci",
+            server_md5=None,  # RomM's content_hash for save assets is null
+            server_size=eternal_darkness_size,
+            server_updated_at="2026-05-06T04:26:48+00:00",
+            last_sync_md5="6425447be942f496469609c4b173cb76",
+            last_sync_server_size=eternal_darkness_size,
+            last_sync_server_updated_at="2026-05-05T13:24:40+00:00",
+        )
+        assert result.action == "download"
+        assert "server changed" in result.reason
 
 
 class TestClassifyOrphanServerKey:
@@ -426,3 +455,144 @@ class TestClassifyOrphanServerKey:
         )
         assert result.action == "download"
         assert result.reason == "new server save"
+
+
+class TestClassifyOrphanWithPathProbe:
+    """When the caller probes the resolved local path, classify should
+    use newer-wins instead of the prior-only heuristics. Covers the
+    Eternal Darkness regression: prior says we synced this save, but
+    the local file is gone (deleted, sandbox reset, etc.) — we must
+    re-download to restore.
+    """
+
+    _SERVER_TS = "2026-05-05T05:08:23+00:00"
+    _BEFORE_TS_EPOCH = datetime(2026, 5, 4, 0, 0, 0, tzinfo=UTC).timestamp()
+    _AFTER_TS_EPOCH = datetime(2026, 5, 6, 0, 0, 0, tzinfo=UTC).timestamp()
+    _SERVER_TS_EPOCH = datetime(2026, 5, 5, 5, 8, 23, tzinfo=UTC).timestamp()
+
+    def test_path_empty_with_prior_downloads_to_restore(self) -> None:
+        """The Eternal Darkness regression: prior exists, server
+        unchanged, but the local file at the resolved path is gone."""
+        result = classify(
+            local_md5=None,
+            local_mtime=None,
+            local_save_filename=None,
+            server_md5=None,
+            server_size=2048,
+            server_updated_at=self._SERVER_TS,
+            last_sync_md5="abc123",
+            last_sync_server_size=2048,
+            last_sync_server_updated_at=self._SERVER_TS,
+            local_path_exists=False,
+        )
+        assert result.action == "download"
+        assert "local missing" in result.reason
+
+    def test_path_empty_without_prior_downloads(self) -> None:
+        """First time seeing this server save AND local path is empty —
+        still download. Same outcome as the no-probe fallback, but via
+        the explicit path-aware branch."""
+        result = classify(
+            local_md5=None,
+            local_mtime=None,
+            local_save_filename=None,
+            server_md5="abc",
+            server_size=2048,
+            server_updated_at=self._SERVER_TS,
+            last_sync_md5=None,
+            last_sync_server_size=None,
+            last_sync_server_updated_at=None,
+            local_path_exists=False,
+        )
+        assert result.action == "download"
+
+    def test_path_occupied_server_newer_overwrites(self) -> None:
+        """Path holds a file owned by another emulator-tag key (or
+        a user-placed file), but the server save is newer — overwrite."""
+        result = classify(
+            local_md5=None,
+            local_mtime=None,
+            local_save_filename="Save.gci",
+            server_md5=None,
+            server_size=2048,
+            server_updated_at=self._SERVER_TS,
+            last_sync_md5="abc",
+            last_sync_server_size=2048,
+            last_sync_server_updated_at=self._SERVER_TS,
+            local_path_exists=True,
+            local_path_mtime=self._BEFORE_TS_EPOCH,
+        )
+        assert result.action == "download"
+        assert "newer" in result.reason
+
+    def test_path_occupied_local_newer_skips(self) -> None:
+        """Existing local file is fresher than this server-only key — skip
+        (the key that owns the file will round-trip via its own classify)."""
+        result = classify(
+            local_md5=None,
+            local_mtime=None,
+            local_save_filename="Save.gci",
+            server_md5=None,
+            server_size=2048,
+            server_updated_at=self._SERVER_TS,
+            last_sync_md5="abc",
+            last_sync_server_size=2048,
+            last_sync_server_updated_at=self._SERVER_TS,
+            local_path_exists=True,
+            local_path_mtime=self._AFTER_TS_EPOCH,
+        )
+        assert result.action == "skip"
+        assert "newer than server" in result.reason
+
+    def test_path_occupied_within_tolerance_is_ambiguous(self) -> None:
+        result = classify(
+            local_md5=None,
+            local_mtime=None,
+            local_save_filename="Save.gci",
+            server_md5=None,
+            server_size=2048,
+            server_updated_at=self._SERVER_TS,
+            last_sync_md5="abc",
+            last_sync_server_size=2048,
+            last_sync_server_updated_at=self._SERVER_TS,
+            local_path_exists=True,
+            local_path_mtime=self._SERVER_TS_EPOCH + 1,  # within 60s
+        )
+        assert result.action == "ambiguous"
+
+    def test_path_occupied_no_mtime_skips_conservatively(self) -> None:
+        """Path exists but stat() failed — defer to the owning key without
+        risking a clobber."""
+        result = classify(
+            local_md5=None,
+            local_mtime=None,
+            local_save_filename="Save.gci",
+            server_md5=None,
+            server_size=2048,
+            server_updated_at=self._SERVER_TS,
+            last_sync_md5="abc",
+            last_sync_server_size=2048,
+            last_sync_server_updated_at=self._SERVER_TS,
+            local_path_exists=True,
+            local_path_mtime=None,
+        )
+        assert result.action == "skip"
+        assert "mtime unreadable" in result.reason
+
+    def test_no_probe_falls_back_to_legacy_behavior(self) -> None:
+        """When `local_path_exists=None` (caller didn't probe), classify
+        retains its v3 ck5.2 behaviour: server unchanged → skip."""
+        result = classify(
+            local_md5=None,
+            local_mtime=None,
+            local_save_filename=None,
+            server_md5=None,
+            server_size=2048,
+            server_updated_at=self._SERVER_TS,
+            last_sync_md5="abc",
+            last_sync_server_size=2048,
+            last_sync_server_updated_at=self._SERVER_TS,
+            # local_path_exists not passed
+        )
+        assert result.action == "skip"
+        assert "no local match" in result.reason

@@ -70,6 +70,8 @@ def classify(
     last_sync_md5: str | None,
     last_sync_server_size: int | None,
     last_sync_server_updated_at: str | None,
+    local_path_exists: bool | None = None,
+    local_path_mtime: float | None = None,
 ) -> Classification:
     """End-to-end disposition for one (rom, emulator, slot) key.
 
@@ -83,6 +85,18 @@ def classify(
     `last_sync_*` come from the prior `SaveRecord` (None when there's
     no prior). All `*_md5` / `*_updated_at` are normalized to
     None-or-non-empty by the caller.
+
+    `local_path_exists` / `local_path_mtime` describe the file at the
+    location ferry would download to — when the walker found no local
+    save under this key, the resolved path may still hold a file
+    (placed by the user, or owned by another emulator-tag key in the
+    same backend). Callers that probe the path pass these in; classify
+    uses them in the "no local match + has server" branch to decide
+    between download (path empty or server newer) and skip (path holds
+    a fresher file owned by another key). Pass None to fall back to
+    pre-probe behaviour (always download for new server saves; for
+    server-only-with-prior, server-changed → download, server-unchanged
+    → skip).
     """
     has_local = local_md5 is not None and local_mtime is not None
     has_server = server_md5 is not None or server_updated_at is not None
@@ -99,21 +113,27 @@ def classify(
         return Classification(action="skip", reason="nothing to sync")
 
     if not has_local and has_server:
+        # When the caller probed the resolved local path, defer to the
+        # newer-wins comparison: the file at the path (placed by user
+        # or owned by another emulator-tag key) is the local context,
+        # and the server save's `updated_at` is the server context.
+        # This collapses two cases into one logic:
+        #   - Lost-local: path doesn't exist → download to restore.
+        #   - Multi-tag collision: path exists, owned by another key →
+        #     newer-wins; if server is fresher, overwrite; if local is
+        #     fresher, skip and let the other key's classify handle it.
+        if local_path_exists is not None:
+            return _classify_server_only_with_path(
+                server_md5=s_md5,
+                server_updated_at=server_ts,
+                local_path_exists=local_path_exists,
+                local_path_mtime=local_path_mtime,
+                local_save_filename=local_save_filename,
+            )
         if has_prior:
-            # We've synced this server record before but the walker didn't
-            # find a local match this round. Common cause: the server
-            # holds multiple records for the same (rom_id, slot) under
-            # different emulator tags (e.g. `retroarch-snes9x` +
-            # `retroarch-bsnes` from another host with sort-by-core),
-            # while this host's content-only layout collapses everything
-            # to plain `retroarch`. The orphan keys would download to the
-            # same on-disk path that's already covered by the local key,
-            # clobbering each other every sync.
-            #
-            # Re-evaluate the orphan via prior-vs-server comparison. If
-            # the server hasn't changed since we last handled it, skip;
-            # otherwise download (the user explicitly updated it
-            # somewhere).
+            # No path probe — fall back to prior-based reasoning: skip
+            # when server is unchanged (multi-tag collision protection
+            # without path knowledge), download otherwise.
             s_changed = _server_changed_against_prior(
                 last_sync_md5=last_sync_md5,
                 last_sync_server_size=last_sync_server_size,
@@ -195,6 +215,57 @@ def classify(
     )
 
 
+def _classify_server_only_with_path(
+    *,
+    server_md5: str,
+    server_updated_at: str,
+    local_path_exists: bool,
+    local_path_mtime: float | None,
+    local_save_filename: str | None,
+) -> Classification:
+    """Newer-wins for a server save with no local-key match, given the
+    file-at-resolved-path probe.
+
+    - Path empty → download (lost-local recovery, or first-time server save
+      with no on-disk collision).
+    - Path occupied + server newer → download (overwrite, server wins).
+    - Path occupied + local newer → skip (existing file is fresher; let
+      the key that owns it round-trip through its own classify).
+    - Path occupied + within tolerance → ambiguous (don't pick a side).
+    - Path occupied but mtime unreadable → skip conservatively (can't
+      compare; assume the other key owns it).
+    """
+    if not local_path_exists:
+        return Classification(
+            action="download",
+            reason="local missing — restoring from server",
+        )
+    if local_path_mtime is None:
+        return Classification(
+            action="skip",
+            reason="local path occupied but mtime unreadable; deferring to owning key",
+        )
+    resolution = resolve_newest(local_mtime=local_path_mtime, server_updated_at=server_updated_at)
+    if resolution == "ambiguous":
+        label = local_save_filename or "<server-only>"
+        return Classification(
+            action="ambiguous",
+            reason="server-only key within tolerance of local path",
+            ambiguous_message=f"{label}: server-only within tolerance of local path",
+        )
+    if resolution == "upload":
+        return Classification(
+            action="skip",
+            reason="local file at path is newer than server",
+        )
+    # server newer
+    return Classification(
+        action="download",
+        reason="server newer than local file at path",
+        conflict_resolved=True,
+    )
+
+
 def _server_changed_against_prior(
     *,
     last_sync_md5: str | None,
@@ -207,9 +278,26 @@ def _server_changed_against_prior(
     """Has the server-side save changed since our last successful sync?
 
     Combines `server_changed_fast`'s timestamp+size fast path with a
-    slow-path fallback that prefers content_hash but tolerates RomM's
-    `content_hash: null` configurations by falling through to size
-    comparison.
+    slow-path fallback that compares content_hash when available, and
+    is otherwise conservative — when timestamps differ but no
+    content_hash is exposed by the server, classify as **changed**.
+
+    Why no size fallback in the slow path: many save formats have
+    fixed byte sizes that don't reflect their state. GameCube `.gci`
+    files are sized by memory-card blocks (15 × 8192 + 64 = 122944 for
+    Eternal Darkness — same byte length whether the save is fresh or
+    has 100 hours of progress). RetroArch SRMs match the cart's SRAM
+    capacity. PCSX2 memcards, Wii NAND files, etc. have similar
+    block-rounded sizing. A size-equal-to-prior check would silently
+    skip real cross-device save updates whenever the new save happens
+    to use the same block count as the old one.
+
+    Cost of being conservative: occasional redundant downloads when
+    RomM bumps the row's `updated_at` without changing content (e.g.,
+    its scanner re-validating the file). After one such download, the
+    new `updated_at` is recorded in the prior, and subsequent syncs
+    skip via the fast path. Bounded; correctness preferred over
+    bandwidth.
     """
     s_changed = server_changed_fast(
         stored_updated_at=last_sync_server_updated_at,
@@ -219,20 +307,23 @@ def _server_changed_against_prior(
     )
     if s_changed is not None:
         return s_changed
-    # Slow path. Prefer hashes when the server has them.
-    # When the server returns null/empty `content_hash` (RomM admins
-    # disable asset hashing in some configurations), comparing
-    # `"" != last_sync_md5` would always say "changed" and re-trigger
-    # downloads forever. Fall back to size comparison: same size +
-    # different timestamp is most likely a server-side metadata
-    # touch, not new content.
+    # Slow path: timestamps differ. Prefer content_hash when the
+    # server exposes one — that's a reliable equality signal.
     if server_md5:
         return server_md5 != last_sync_md5
-    if server_size is not None and last_sync_server_size is not None:
-        return server_size != last_sync_server_size
-    # No hash, no size — genuinely indeterminate. Be conservative and
-    # treat as changed; downloading once is better than missing a real
-    # update.
+    # No content_hash. Sizes ARE useful in one direction: if the
+    # server's size differs from prior's, content definitely changed
+    # (no fixed-block format can produce different sizes for the same
+    # logical save). If sizes match, content COULD be unchanged or
+    # COULD be a different save in the same block layout — treat as
+    # changed (conservative) since there's no way to verify equality
+    # from server metadata alone.
+    if (
+        server_size is not None
+        and last_sync_server_size is not None
+        and server_size != last_sync_server_size
+    ):
+        return True
     return True
 
 

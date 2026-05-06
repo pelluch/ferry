@@ -518,3 +518,75 @@ def test_delete_for_rom_preserves_other_roms_saves(tmp_path: Path) -> None:
 
     assert not smash_gci.exists()
     assert metroid_gci.exists()  # untouched
+
+
+# ---------------------------------------------------------------------------
+# Stale-prior regression: server has it, prior says we synced it,
+# walker found nothing — re-download because the local file is gone.
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_sync_redownloads_when_local_file_was_deleted_after_prior_sync(
+    tmp_path: Path,
+) -> None:
+    """Eternal Darkness regression: ferry synced this save before (prior
+    SaveRecord exists), the user/system removed the local .gci, and now
+    the walker finds nothing. With path-aware classify, we detect the
+    empty resolved path and download to restore."""
+    saves_root = tmp_path / "GC"
+    install = _make_install(saves_root)
+    roms_base = tmp_path / "roms"
+
+    rom = _make_rom(
+        rom_id=42,
+        output_path="gc/Eternal Darkness.rvz",
+        saves=(
+            SaveRecord(
+                emulator="dolphin",
+                slot="Eternal Darkness",
+                save_filename="01-GEDE-Eternal Darkness.gci",
+                last_sync_md5="6425447be942f496469609c4b173cb76",
+                last_sync_server_size=122944,
+                last_sync_server_updated_at="2026-05-05T13:24:40+00:00",
+                last_synced_at="2026-05-06T04:24:21Z",
+                server_save_id=35,
+            ),
+        ),
+    )
+    rp = _plant_rom_file(roms_base, "gc/Eternal Darkness.rvz")
+    state = _make_state([rom])
+
+    download_bytes = b"\x00" * 122944
+    download_md5 = _md5(download_bytes)
+
+    # Server returns the SAME save record (unchanged since prior).
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                _server_save(
+                    save_id=35,
+                    rom_id=42,
+                    slot="Eternal Darkness",
+                    file_name="01-GEDE-Eternal Darkness.gci",
+                    file_size=122944,
+                    md5=download_md5,
+                    updated_at="2026-05-05T13:24:40+00:00",
+                )
+            ],
+        )
+    )
+    respx.get(f"{BASE_URL}/api/saves/35/content").mock(
+        return_value=httpx.Response(200, content=download_bytes)
+    )
+
+    headers = {str(rp): DiscHeader(game_code="GEDE", maker_code="01", region="NTSC-U")}
+    backend, http = _make_backend(install, roms_base=roms_base, headers=headers)
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1, "stale-prior + lost-local should re-download to restore"
+    dest = saves_root / "USA" / "Card A" / "01-GEDE-Eternal Darkness.gci"
+    assert dest.is_file()
+    assert dest.read_bytes() == download_bytes
