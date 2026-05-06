@@ -594,3 +594,86 @@ def test_status_hooks_block_present_but_no_snapshot(
     result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
     assert result.exit_code == 0, result.output
     assert "managed block present but no drift snapshot" in result.output
+
+
+# ---------------------------------------------------------------------------
+# [orphan saves] section
+# ---------------------------------------------------------------------------
+
+
+def test_status_orphan_saves_clean_when_no_unmatched(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    saves_dir = tmp_path / ".config/retroarch/saves"
+    saves_dir.mkdir(parents=True)
+    _write_ra_cfg(tmp_path, ".config/retroarch", 'sort_savefiles_enable = "true"\n')
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "[orphan saves]" in result.output
+    assert "✓ all local saves match a tracked ROM" in result.output
+
+
+def test_status_orphan_saves_lists_real_orphans(tmp_path: Path, monkeypatch) -> None:
+    """RA save with no matching tracked ROM → listed as a real orphan."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    saves_dir = tmp_path / ".config/retroarch/saves"
+    saves_dir.mkdir(parents=True)
+    (saves_dir / "Frogger.srm").write_bytes(b"x")
+    _write_ra_cfg(tmp_path, ".config/retroarch", 'sort_savefiles_enable = "true"\n')
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "1 unmatched" in result.output
+    assert "Frogger.srm" in result.output
+
+
+def test_status_orphan_saves_hides_retrodeck_backups_by_default(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """RetroDECK `_YYYYMMDD_HHMMSS` SRMs are classified as backup-noise."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    saves_dir = tmp_path / ".config/retroarch/saves"
+    saves_dir.mkdir(parents=True)
+    (saves_dir / "Frogger.srm").write_bytes(b"x")
+    (saves_dir / "Super Mario 64 (USA)_20260424_054107.srm").write_bytes(b"y")
+    _write_ra_cfg(tmp_path, ".config/retroarch", 'sort_savefiles_enable = "true"\n')
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "1 unmatched" in result.output  # only the real orphan counts as unmatched
+    assert "1 RetroDECK backup" in result.output
+    assert "Frogger.srm" in result.output
+    assert "Super Mario 64 (USA)_20260424_054107.srm" not in result.output
+    assert "pass --show-all" in result.output
+
+
+def test_status_orphan_saves_shows_backups_with_show_all(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    saves_dir = tmp_path / ".config/retroarch/saves"
+    saves_dir.mkdir(parents=True)
+    (saves_dir / "Super Mario 64 (USA)_20260424_054107.srm").write_bytes(b"y")
+    _write_ra_cfg(tmp_path, ".config/retroarch", 'sort_savefiles_enable = "true"\n')
+    cfg = write_config(tmp_path / "config.toml")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status", "--show-all"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Super Mario 64 (USA)_20260424_054107.srm" in result.output
+    assert "RetroDECK backup" in result.output
+
+
+def test_status_orphan_saves_no_install_detected(tmp_path: Path, monkeypatch) -> None:
+    """Without an RA install at all, the section says so but doesn't fail."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "[orphan saves]" in result.output
+    assert "(no install detected)" in result.output

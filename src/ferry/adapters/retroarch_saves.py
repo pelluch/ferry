@@ -34,7 +34,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from ferry.adapters.retroarch_core_info import CoreInfoIndex
-from ferry.adapters.retroarch_paths import RetroArchInstall
+from ferry.adapters.retroarch_paths import RetroArchInstall, is_ra_save_file
 from ferry.domain.save_local import LocalSave
 from ferry.domain.state import RomState
 
@@ -74,7 +74,14 @@ def list_local_saves(
     matched: list[LocalSave] = []
     warnings: list[str] = []
 
-    for path in sorted(p for p in saves_dir.rglob("*") if p.is_file()):
+    # Filter to RA save-file shapes BEFORE matching. On RetroDECK's
+    # shared-saves layout (`~/retrodeck/saves/` is the root for every
+    # emulator), the walker would otherwise see Dolphin GCIs, PCSX2
+    # memcards, Wii NAND files, etc. as unmatched RA saves and produce
+    # noise warnings for ROMs that aren't RA's responsibility. Native
+    # AUR installs whose savefile_directory only contains RA stuff
+    # don't surface this — RetroDECK's layout is what exposes it.
+    for path in sorted(p for p in saves_dir.rglob("*") if p.is_file() and is_ra_save_file(p)):
         rel = path.relative_to(saves_dir)
         rom = rom_index.get(path.stem)
         if rom is None:

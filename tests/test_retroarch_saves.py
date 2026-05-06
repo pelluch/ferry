@@ -206,7 +206,10 @@ def test_unmatched_does_not_block_matched(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("ext", [".srm", ".sav", ".rtc"])
+@pytest.mark.parametrize(
+    "ext",
+    [".srm", ".sav", ".rtc", ".state", ".state1", ".state10", ".psrm"],
+)
 def test_walker_includes_common_save_extensions(tmp_path: Path, ext: str) -> None:
     saves = tmp_path / "saves"
     saves.mkdir()
@@ -217,6 +220,45 @@ def test_walker_includes_common_save_extensions(tmp_path: Path, ext: str) -> Non
     matched, _ = list_local_saves(_install(saves), [rom])
     assert len(matched) == 1
     assert matched[0].save_filename == f"Game{ext}"
+
+
+def test_walker_filters_out_non_ra_files_on_shared_saves_layout(tmp_path: Path) -> None:
+    """RetroDECK's `~/retrodeck/saves/` is the shared root for every
+    emulator. The walker must NOT treat Dolphin GCIs / PCSX2 memcards /
+    Wii NAND files as unmatched RA saves — they aren't RA's responsibility."""
+    saves = tmp_path / "saves"
+    saves.mkdir()
+    # Plant non-RA files that would appear under a RetroDECK shared layout.
+    (saves / "gc").mkdir()
+    (saves / "gc" / "dolphin").mkdir()
+    (saves / "gc" / "dolphin" / "GP" / "Card A").mkdir(parents=True)
+    (saves / "gc" / "dolphin" / "GP" / "Card A" / "01-GAFE-pikmin.gci").write_bytes(b"x")
+    (saves / "ps2").mkdir()
+    (saves / "ps2" / "memcard.ps2").write_bytes(b"x")
+    (saves / ".directory").write_text("[Desktop Entry]")  # KDE file manager droppings
+    # Plus one genuine RA save belonging to a tracked ROM.
+    (saves / "Pikmin.srm").write_bytes(b"x")
+
+    rom = _make_rom(1, source_filename="Pikmin.zip")
+    matched, warnings = list_local_saves(_install(saves), [rom])
+    # Only the .srm matches; no warnings for the GCI / memcard / .directory.
+    assert len(matched) == 1
+    assert matched[0].save_filename == "Pikmin.srm"
+    assert warnings == []
+
+
+def test_walker_still_warns_on_unmatched_ra_save(tmp_path: Path) -> None:
+    """The filter must not suppress warnings about RA-shaped files that
+    legitimately don't match any tracked ROM — those are real orphans."""
+    saves = tmp_path / "saves"
+    saves.mkdir()
+    (saves / "Frogger.srm").write_bytes(b"x")  # RA save, no matching ROM
+    (saves / "memcard.ps2").write_bytes(b"x")  # non-RA, must be filtered out
+
+    matched, warnings = list_local_saves(_install(saves), [])
+    assert matched == []
+    assert len(warnings) == 1
+    assert "Frogger.srm" in warnings[0]
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ from pathlib import Path
 from ferry.adapters.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
+    is_ra_save_file,
     select_active_install,
 )
 
@@ -203,3 +204,45 @@ def test_select_falls_back_to_first_priority_when_none_have_saves() -> None:
     rd = _install("retrodeck-flatpak", has_saves=False)
     native = _install("native", has_saves=False)
     assert select_active_install([rd, native]) is rd
+
+
+# ---------------------------------------------------------------------------
+# is_ra_save_file — extension filter for the walker
+# ---------------------------------------------------------------------------
+
+
+def test_is_ra_save_file_matches_static_extensions() -> None:
+    for name in ("Game.srm", "Game.sav", "Game.rtc", "Game.state", "Game.psrm"):
+        assert is_ra_save_file(Path(name)), name
+
+
+def test_is_ra_save_file_matches_numbered_state_slots() -> None:
+    for name in ("Game.state1", "Game.state2", "Game.state10", "Game.state99"):
+        assert is_ra_save_file(Path(name)), name
+
+
+def test_is_ra_save_file_is_case_insensitive() -> None:
+    for name in ("Game.SRM", "Game.STATE", "Game.STATE2"):
+        assert is_ra_save_file(Path(name)), name
+
+
+def test_is_ra_save_file_rejects_non_ra_extensions() -> None:
+    """Files other emulators put under a shared saves root must be filtered out."""
+    rejects = (
+        "Pikmin.gci",  # Dolphin GameCube save
+        "memcard.ps2",  # PCSX2 memory card
+        "Wiimote.bin",  # Wii NAND-style binary
+        "title.tmd",  # Wii U title metadata
+        "Eeprom.bin",  # Xbox eeprom
+        "notes.txt",
+        "config.ini",
+        "Game.state.bak",  # backup variant
+    )
+    for name in rejects:
+        assert not is_ra_save_file(Path(name)), name
+
+
+def test_is_ra_save_file_rejects_state_with_non_digits() -> None:
+    """`.statebak` shouldn't match — only `.state\\d+` is a numbered slot."""
+    assert not is_ra_save_file(Path("Game.statebak"))
+    assert not is_ra_save_file(Path("Game.stateA"))

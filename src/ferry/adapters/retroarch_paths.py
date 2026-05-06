@@ -189,11 +189,35 @@ def select_active_install(installs: list[RetroArchInstall]) -> RetroArchInstall 
     return None  # ambiguous
 
 
-# Save-file extensions we count as evidence of active RetroArch use.
-# Other files (`.directory` from KDE, stale `.log`s from standalone emulators
-# accidentally dumping into the saves dir, etc.) don't count — we want a
-# strong signal that someone actually saves through this install.
-_SAVE_EXTENSIONS = frozenset({".srm", ".sav", ".rtc"})
+# Save-file extensions we count as evidence of active RetroArch use, AND
+# the same set the layout-aware walker uses to filter out files that
+# aren't RA's responsibility. Numbered save states (`.state1`,
+# `.state2`, ...) are handled via the `is_ra_save_file` startswith
+# check — Path.suffix returns `.state2` not `.state` so they wouldn't
+# match a static set on their own.
+#
+# This filter matters most on shared-saves layouts (RetroDECK puts
+# Dolphin GCIs, PCSX2 memcards, Wii NAND files under the same root as
+# RA's saves). Without filtering, the walker treats every non-RA file
+# as an unmatched orphan and floods the user with warnings about ROMs
+# they never synced via ferry.
+_SAVE_EXTENSIONS = frozenset({".srm", ".sav", ".rtc", ".state", ".psrm"})
+
+
+def is_ra_save_file(path: Path) -> bool:
+    """True iff `path`'s name matches a known RetroArch save-file shape.
+
+    Static set covers SRAM (`.srm`), generic saves (`.sav`), RTC
+    (`.rtc`), the slot-zero save state (`.state`), and Mednafen-class
+    cores' SRM variant (`.psrm`). Numbered save states (`.state1`,
+    `.state2`, …) are matched by a startswith check on the suffix
+    since `Path.suffix` returns the full numbered token.
+    """
+    suffix = path.suffix.lower()
+    if suffix in _SAVE_EXTENSIONS:
+        return True
+    # Numbered save states: `.state1`, `.state2`, ..., `.state10`, etc.
+    return suffix.startswith(".state") and suffix[len(".state") :].isdigit()
 
 
 def _dir_has_save_files(path: Path) -> bool:
@@ -202,7 +226,7 @@ def _dir_has_save_files(path: Path) -> bool:
         return False
     try:
         for entry in path.rglob("*"):
-            if entry.is_file() and entry.suffix.lower() in _SAVE_EXTENSIONS:
+            if entry.is_file() and is_ra_save_file(entry):
                 return True
     except OSError:
         return False

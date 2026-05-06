@@ -8,6 +8,7 @@ what's actually on disk, and where the two diverge. The high-frequency
 from __future__ import annotations
 
 import contextlib
+import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,11 +24,13 @@ from ferry.adapters.dolphin_paths import (
     select_active_install as select_active_dolphin,
 )
 from ferry.adapters.esde_paths import ESDEInstall, discover_esde_installs
+from ferry.adapters.retroarch_core_info import CoreInfoIndex
 from ferry.adapters.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
     select_active_install,
 )
+from ferry.adapters.retroarch_saves import list_local_saves as list_ra_local_saves
 from ferry.adapters.sidecar import sidecar_path_for
 from ferry.adapters.state_store import default_state_path, load_state
 from ferry.config import ConfigError, load_config
@@ -45,8 +48,16 @@ from ferry.services.trash import default_trash_root
 
 
 @click.command()
+@click.option(
+    "--show-all",
+    is_flag=True,
+    help=(
+        "Include backup-noise entries in the orphan-saves listing "
+        "(RetroDECK's `_YYYYMMDD_HHMMSS` SRM backups)."
+    ),
+)
 @click.pass_context
-def status(ctx: click.Context) -> None:
+def status(ctx: click.Context, show_all: bool) -> None:
     """Show what ferry knows: configured sources, on-disk state, and reconcile."""
     click.echo(f"ferry {__version__}")
 
@@ -101,6 +112,10 @@ def status(ctx: click.Context) -> None:
     click.echo("")
     click.echo("[launch_hooks]")
     _print_esde_status()
+
+    click.echo("")
+    click.echo("[orphan saves]")
+    _print_orphan_saves(config, state, show_all=show_all)
 
     if state.roms and config.destination is not None:
         _print_reconcile(state, config)
@@ -299,6 +314,114 @@ def _describe_hook_status(install: ESDEInstall, drift: HookStatus | None) -> str
             "or `uninstall-launch-hooks` to clear)"
         )
     return "✓ installed and in sync"  # defensive — every case above covers actual states
+
+
+# Stem-suffix pattern matching RetroDECK's SRM backup convention:
+# `<basename>_YYYYMMDD_HHMMSS.<ext>`. RetroDECK's "backup save data"
+# feature creates these as siblings of the canonical SRM. ferry doesn't
+# touch them (the walker filters on extension, not stem shape) but they
+# DO show up as unmatched-orphan warnings because their stem doesn't
+# match any tracked ROM. We classify them out of the default listing
+# so the user sees real orphans, not backups.
+_BACKUP_SUFFIX_PATTERN = re.compile(r"_\d{8}_\d{6}$")
+
+
+def _is_backup_noise(filename: str) -> bool:
+    """True iff `filename` looks like a RetroDECK SRM backup artifact."""
+    return bool(_BACKUP_SUFFIX_PATTERN.search(Path(filename).stem))
+
+
+def _print_orphan_saves(config: Config, state: LibraryState, *, show_all: bool) -> None:
+    """List RetroArch save files on disk that don't match any tracked ROM.
+
+    Calls `list_local_saves` (the same walker save sync uses) and surfaces
+    its warnings with the actual filenames so the user can decide:
+      - sync the missing ROM to RomM,
+      - delete the orphan save,
+      - ignore (it's from a ROM the user manages outside ferry).
+
+    Backup-noise entries (RetroDECK `_YYYYMMDD_HHMMSS` SRMs) are
+    classified separately and hidden by default; `--show-all` exposes
+    them. Dolphin's walker is per-rom-scoped so doesn't surface
+    unmatched GCIs the same way; out of scope for this listing.
+    """
+    installs = discover_retroarch_installs()
+    if not installs:
+        click.echo("  retroarch:   (no install detected)")
+        return
+    install = _resolve_ra_install_for_orphans(config, installs)
+    if install is None:
+        # Configured choice missing or ambiguous; the [saves] section
+        # already explained why. Don't double-warn here.
+        return
+    core_info = _load_core_info_index(install)
+    _, warnings = list_ra_local_saves(install, state.roms.values(), core_info)
+
+    real: list[str] = []
+    backup: list[str] = []
+    for warning in warnings:
+        # Walker warnings include the relative path quoted in the
+        # message; recover it from the warning text so we can classify.
+        filename = _extract_filename_from_warning(warning)
+        if filename is None:
+            real.append(warning)
+            continue
+        if _is_backup_noise(filename):
+            backup.append(filename)
+        else:
+            real.append(filename)
+
+    if not real and not backup:
+        click.echo("  retroarch:   ✓ all local saves match a tracked ROM")
+        return
+
+    parts = []
+    if real:
+        parts.append(f"{len(real)} unmatched")
+    if backup:
+        parts.append(f"{len(backup)} RetroDECK backup{'s' if len(backup) != 1 else ''}")
+    click.echo(f"  retroarch:   {', '.join(parts)}")
+
+    for entry in real:
+        click.echo(f"    - {entry}")
+    if show_all:
+        for entry in backup:
+            click.echo(f"    - {entry}  (RetroDECK backup)")
+    elif backup:
+        click.echo(f"    ({len(backup)} backup-noise hidden — pass --show-all to list)")
+
+
+def _resolve_ra_install_for_orphans(
+    config: Config, installs: list[RetroArchInstall]
+) -> RetroArchInstall | None:
+    """Pick the RetroArch install for orphan-listing purposes.
+
+    Mirrors `_select_retroarch_install` in `cli/sync.py`: configured
+    override wins, otherwise auto-select. Returns None when ambiguous
+    or the configured choice doesn't match — in those cases the
+    `[saves]` section has already told the user; we stay quiet here.
+    """
+    configured = config.saves.retroarch_install if config.saves else None
+    if configured is not None:
+        return next((i for i in installs if i.source == configured), None)
+    return select_active_install(installs)
+
+
+def _load_core_info_index(install: RetroArchInstall) -> CoreInfoIndex:
+    """Wrap the install in a `CoreInfoIndex`; loading is lazy + best-effort.
+
+    Orphan listing only needs filenames, not accurate emulator labels —
+    this is here to satisfy the walker's optional `core_info` argument.
+    """
+    return CoreInfoIndex(install)
+
+
+def _extract_filename_from_warning(warning: str) -> str | None:
+    """Pull the quoted filename out of a walker warning. None if not found."""
+    # Walker emits `could not match save 'Foo.srm' to any known ROM ...`
+    # and `could not read save 'Foo.srm': ...`. Single-quoted in both.
+    match = re.search(r"'([^']+)'", warning)
+    return match.group(1) if match else None
 
 
 def _print_reconcile(state: LibraryState, config: Config) -> None:
