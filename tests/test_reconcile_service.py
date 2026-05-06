@@ -206,7 +206,7 @@ def test_build_index_indexes_each_file_by_name_and_hash() -> None:
             _file_payload(10, "Pikmin (USA).iso", md5="abc"),
         ],
     )
-    by_name, by_hash = build_index([rom])
+    by_name, by_hash, by_stem = build_index([rom])
     assert "Pikmin (USA).iso" in by_name
     assert "abc" in by_hash
     assert by_name["Pikmin (USA).iso"][0].rom_id == 1
@@ -215,7 +215,7 @@ def test_build_index_indexes_each_file_by_name_and_hash() -> None:
 
 def test_build_index_lowercases_md5() -> None:
     rom = _rom_payload(1, "X", fs_name="x", files=[_file_payload(1, "x.iso", md5="ABCDEF")])
-    _, by_hash = build_index([rom])
+    _, by_hash, _ = build_index([rom])
     assert "abcdef" in by_hash
     assert "ABCDEF" not in by_hash
 
@@ -229,7 +229,7 @@ def test_build_index_skips_files_without_md5_in_hash_index() -> None:
         fs_name="game.nsp",
         files=[_file_payload(1, "game.nsp", md5=None)],
     )
-    by_name, by_hash = build_index([rom])
+    by_name, by_hash, by_stem = build_index([rom])
     assert "game.nsp" in by_name
     assert by_hash == {}
 
@@ -246,7 +246,7 @@ def test_build_index_handles_multi_file_roms() -> None:
             _file_payload(4, "CD2.bin", md5="ddd"),
         ],
     )
-    by_name, by_hash = build_index([rom])
+    by_name, by_hash, by_stem = build_index([rom])
     assert set(by_name) == {"CD1.cue", "CD1.bin", "CD2.cue", "CD2.bin"}
     assert set(by_hash) == {"aaa", "bbb", "ccc", "ddd"}
 
@@ -281,7 +281,7 @@ def test_classify_confident_when_name_and_hash_both_match(tmp_path: Path) -> Non
         fs_name="Game.gba",
         files=[_file_payload(10, "Game.gba", md5=md5)],
     )
-    by_name, by_hash = build_index([rom])
+    by_name, by_hash, by_stem = build_index([rom])
 
     result = classify(_orphan(target, roms_base=roms_base), by_name, by_hash)
     assert isinstance(result, Confident)
@@ -310,7 +310,7 @@ def test_classify_confident_for_zip_pass_through(tmp_path: Path) -> None:
         platform_slug="dos",
         files=[_file_payload(10, "Game.zip", md5=inner_md5)],
     )
-    by_name, by_hash = build_index([rom])
+    by_name, by_hash, by_stem = build_index([rom])
 
     result = classify(
         _orphan(target, roms_base=roms_base, platform_dir="dos"),
@@ -333,7 +333,7 @@ def test_classify_name_only_when_hash_differs(tmp_path: Path) -> None:
         fs_name="Game.gba",
         files=[_file_payload(10, "Game.gba", md5="ffffffff" * 4)],
     )
-    by_name, by_hash = build_index([rom])
+    by_name, by_hash, by_stem = build_index([rom])
 
     result = classify(_orphan(target, roms_base=roms_base), by_name, by_hash)
     assert isinstance(result, NameOnly)
@@ -356,7 +356,7 @@ def test_classify_hash_only_when_name_differs(tmp_path: Path) -> None:
         fs_name="Game.gba",
         files=[_file_payload(10, "Game (USA).gba", md5=md5)],
     )
-    by_name, by_hash = build_index([rom])
+    by_name, by_hash, by_stem = build_index([rom])
 
     result = classify(_orphan(target, roms_base=roms_base), by_name, by_hash)
     assert isinstance(result, HashOnly)
@@ -387,7 +387,7 @@ def test_classify_ambiguous_when_two_roms_share_name_and_hash(tmp_path: Path) ->
         fs_name="Dup.gba",
         files=[_file_payload(20, "Dup.gba", md5=md5)],
     )
-    by_name, by_hash = build_index([rom_a, rom_b])
+    by_name, by_hash, by_stem = build_index([rom_a, rom_b])
 
     result = classify(_orphan(target, roms_base=roms_base), by_name, by_hash)
     assert isinstance(result, Ambiguous)
@@ -406,7 +406,7 @@ def test_classify_no_match_when_neither_index_matches(tmp_path: Path) -> None:
         fs_name="Other.gba",
         files=[_file_payload(10, "Other.gba", md5="00" * 16)],
     )
-    by_name, by_hash = build_index([rom])
+    by_name, by_hash, by_stem = build_index([rom])
 
     result = classify(_orphan(target, roms_base=roms_base), by_name, by_hash)
     assert isinstance(result, NoMatch)
@@ -422,6 +422,116 @@ def test_classify_no_match_when_rom_listing_is_empty(tmp_path: Path) -> None:
 
     result = classify(_orphan(target, roms_base=roms_base), by_name={}, by_hash={})
     assert isinstance(result, NoMatch)
+
+
+# ---------------------------------------------------------------------------
+# Stem-equivalence — Confident match when extension differs (the unzip case)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_stem_match_with_hash_match_is_confident(tmp_path: Path) -> None:
+    """The unzip case from live testing: server file is `Game.zip`, local
+    file is `Game.rvz` (Dolphin-compressed disc image post-unzip). RomM's
+    md5 is over the zip's largest inner file (== the local .rvz); stems
+    are equal. Should adopt confidently."""
+    roms_base = tmp_path / "ROMs"
+    target = roms_base / "gc" / "Eternal Darkness - Sanity's Requiem (USA).rvz"
+    target.parent.mkdir(parents=True)
+    payload = b"RVZ disc bytes" * 1000
+    target.write_bytes(payload)
+
+    import hashlib
+
+    md5 = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+    rom = _rom_payload(
+        1,
+        "Eternal Darkness: Sanity's Requiem",
+        fs_name="Eternal Darkness - Sanity's Requiem (USA).zip",
+        platform_slug="gc",
+        files=[_file_payload(10, "Eternal Darkness - Sanity's Requiem (USA).zip", md5=md5)],
+    )
+    by_name, by_hash, by_stem = build_index([rom])
+    result = classify(
+        _orphan(target, roms_base=roms_base, platform_dir="gc"),
+        by_name,
+        by_hash,
+        by_stem,
+    )
+    assert isinstance(result, Confident)
+    assert result.match.rom_id == 1
+    assert result.local_md5 == md5
+
+
+def test_classify_stem_match_without_hash_match_is_name_only(tmp_path: Path) -> None:
+    """Stem matches but hash doesn't — should NOT promote to Confident.
+    Falls through to NameOnly (via the orphan having a different
+    revision/region of the same name)."""
+    roms_base = tmp_path / "ROMs"
+    target = roms_base / "gc" / "Game.iso"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"local revision")  # hash differs from server
+
+    rom = _rom_payload(
+        1,
+        "Game",
+        fs_name="Game.zip",
+        platform_slug="gc",
+        files=[_file_payload(10, "Game.zip", md5="ff" * 16)],
+    )
+    by_name, by_hash, by_stem = build_index([rom])
+    result = classify(
+        _orphan(target, roms_base=roms_base, platform_dir="gc"),
+        by_name,
+        by_hash,
+        by_stem,
+    )
+    # by_stem has `Game` → server's `Game.zip`. Stem matches but hash
+    # differs — so the stem-match upgrade doesn't fire. The orphan's
+    # full filename `Game.iso` doesn't appear in by_name. Result:
+    # neither name nor hash match → NoMatch (not NameOnly, since
+    # NameOnly requires the FULL filename to be in by_name).
+    assert isinstance(result, NoMatch)
+
+
+def test_classify_different_stem_same_hash_stays_hash_only(tmp_path: Path) -> None:
+    """Hash match without stem match: user renamed the file. Stays
+    HashOnly (won't be auto-adopted by the stem-equivalence path)."""
+    roms_base = tmp_path / "ROMs"
+    target = roms_base / "gba" / "renamed-by-user.gba"
+    target.parent.mkdir(parents=True)
+    payload = b"matching bytes"
+    target.write_bytes(payload)
+
+    import hashlib
+
+    md5 = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+    rom = _rom_payload(
+        1,
+        "Game",
+        fs_name="Pristine (USA).gba",
+        files=[_file_payload(10, "Pristine (USA).gba", md5=md5)],
+    )
+    by_name, by_hash, by_stem = build_index([rom])
+    result = classify(_orphan(target, roms_base=roms_base), by_name, by_hash, by_stem)
+    assert isinstance(result, HashOnly)
+
+
+def test_build_index_indexes_stems(tmp_path: Path) -> None:
+    """Verify the new `by_stem` map is populated with extension-stripped
+    keys, skipping files where stem == filename (no extension)."""
+    rom = _rom_payload(
+        1,
+        "Game",
+        fs_name="Game.zip",
+        files=[
+            _file_payload(10, "Game.zip", md5="abc"),
+            _file_payload(11, "Game (no extension)", md5="def"),  # stem == name → skipped
+        ],
+    )
+    _, _, by_stem = build_index([rom])
+    assert "Game" in by_stem
+    assert by_stem["Game"][0].file_id == 10
+    assert "Game (no extension)" not in by_stem  # filename has no extension
 
 
 # ---------------------------------------------------------------------------

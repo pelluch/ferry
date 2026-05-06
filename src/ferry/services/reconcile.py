@@ -186,17 +186,28 @@ def find_orphans(
 
 def build_index(
     roms: list[dict[str, Any]],
-) -> tuple[dict[str, list[MatchedFile]], dict[str, list[MatchedFile]]]:
-    """Return `(by_name, by_hash)` maps over RomM's per-platform rom listing.
+) -> tuple[
+    dict[str, list[MatchedFile]],
+    dict[str, list[MatchedFile]],
+    dict[str, list[MatchedFile]],
+]:
+    """Return `(by_name, by_hash, by_stem)` maps over RomM's per-platform
+    rom listing.
 
     Each rom in `roms` should have a `files: list[RomFileSchema]` field;
-    we index every file twice — once by `file_name`, once by md5.
+    we index every file three ways: once by full `file_name`, once by
+    md5, once by filename stem (the part before the last extension).
+    Stem-indexing handles the unzip case — server file `Game.zip`
+    extracts locally to `Game.iso`/`Game.rvz`/`Game.gba`/etc., same
+    stem, hash matches against the largest-inner convention.
+
     Files lacking `md5_hash` (RomM hadn't computed one yet, or platform
-    is in `NON_HASHABLE_PLATFORMS`) are still indexed by name so
-    name-only classification still works for them.
+    is in `NON_HASHABLE_PLATFORMS`) are still indexed by name and stem
+    so name-only classification still works for them.
     """
     by_name: dict[str, list[MatchedFile]] = {}
     by_hash: dict[str, list[MatchedFile]] = {}
+    by_stem: dict[str, list[MatchedFile]] = {}
     for rom in roms:
         rom_id = _safe_int(rom.get("id"))
         if rom_id is None:
@@ -219,21 +230,40 @@ def build_index(
             )
             if file_name:
                 by_name.setdefault(file_name, []).append(mf)
+                stem = Path(file_name).stem
+                if stem and stem != file_name:
+                    by_stem.setdefault(stem, []).append(mf)
             if md5:
                 by_hash.setdefault(md5, []).append(mf)
-    return by_name, by_hash
+    return by_name, by_hash, by_stem
 
 
 def classify(
     orphan: OrphanCandidate,
     by_name: dict[str, list[MatchedFile]],
     by_hash: dict[str, list[MatchedFile]],
+    by_stem: dict[str, list[MatchedFile]] | None = None,
 ) -> Classification:
     """Classify one orphan against a per-platform RomM index.
 
     Hashing follows RomM's "largest inner file of an archive" rule —
     see `adapters/orphan_hash.py:hash_orphan_file`. For non-archive
     files this collapses to a direct md5.
+
+    Confident matches require BOTH name and hash to agree. Two name-
+    equality flavours count:
+      1. Full filename equality (the pass-through case — cartridge
+         `.gba` → server `.gba`).
+      2. Stem-equality when full filenames differ (the unzip case —
+         local `Game.iso` matches server `Game.zip` because RomM's
+         hash is over the `.zip`'s largest inner file, which is the
+         `.iso` we have on disk). Stem-match only fires when the hash
+         matches too — never on name alone — so it can't promote a
+         genuinely-different file into Confident.
+
+    `by_stem` is optional for backward compatibility (older callers
+    that didn't compute it). When None or empty, only full-filename
+    matches contribute to Confident.
     """
     local_md5 = hash_orphan_file(orphan.abs_path)
     name_matches = by_name.get(orphan.abs_path.name, [])
@@ -243,14 +273,30 @@ def classify(
     hash_keys = {(m.rom_id, m.file_id) for m in hash_matches}
     confident_keys = name_keys & hash_keys
 
+    # Stem-equivalence fallback: same stem + same hash → Confident.
+    # Covers transformed-platform adoption (unzip strips the .zip
+    # extension server-side) without ever auto-adopting a file whose
+    # bytes don't match.
+    stem_matches: list[MatchedFile] = []
+    if by_stem and not confident_keys and local_md5:
+        stem_matches = by_stem.get(orphan.abs_path.stem, [])
+        stem_keys = {(m.rom_id, m.file_id) for m in stem_matches}
+        confident_keys = stem_keys & hash_keys
+
     if confident_keys:
-        confidents = [m for m in name_matches if (m.rom_id, m.file_id) in confident_keys]
+        # Pull confidents from whichever side(s) found them so the
+        # resulting MatchedFile preserves rom_data / file_data references.
+        candidates = name_matches + stem_matches + hash_matches
+        seen: set[tuple[int, int]] = set()
+        confidents: list[MatchedFile] = []
+        for m in candidates:
+            key = (m.rom_id, m.file_id)
+            if key in confident_keys and key not in seen:
+                confidents.append(m)
+                seen.add(key)
         unique_rom_ids = {m.rom_id for m in confidents}
         if len(unique_rom_ids) > 1:
             return Ambiguous(orphan=orphan, matches=tuple(confidents), local_md5=local_md5 or "")
-        # Exactly one rom matches; if multiple files within the same rom
-        # both match, take the first (extremely rare — would imply RomM
-        # has two files with identical name AND md5 inside the same rom).
         return Confident(orphan=orphan, match=confidents[0], local_md5=local_md5 or "")
 
     if name_matches:

@@ -348,6 +348,47 @@ def test_reconcile_adopts_multi_file_zip_via_largest_inner_hash(
 
 
 @respx.mock
+def test_reconcile_adopts_unzipped_rom_via_stem_match(tmp_path: Path, monkeypatch) -> None:
+    """Live regression: GC `.rvz` matched server `.zip` by stem + hash
+    (RomM hashes the zip's largest inner file, which is the .rvz). Was
+    previously classified Hash-only because filenames differ; should
+    now be Confident and adopted."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    roms_base = tmp_path / "ROMs"
+    target = roms_base / "gc" / "Eternal Darkness - Sanity's Requiem (USA).rvz"
+    target.parent.mkdir(parents=True)
+    payload = b"RVZ DISC IMAGE" * 5000
+    target.write_bytes(payload)
+    md5 = _md5(payload)
+
+    cfg = _write_config(tmp_path / "config.toml", roms_base=roms_base)
+
+    _mock_platforms([_platform_payload(99, "gc")])
+    _mock_roms_for_platform(
+        99,
+        [
+            _rom_payload(
+                19412,
+                "Eternal Darkness: Sanity's Requiem",
+                fs_name="Eternal Darkness - Sanity's Requiem (USA).zip",
+                platform_slug="gc",
+                files=[_file_payload(1, "Eternal Darkness - Sanity's Requiem (USA).zip", md5)],
+            )
+        ],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "reconcile"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Confident:  1" in result.output
+    assert "Hash-only:  0" in result.output
+    assert "Adopted 1 ROM(s)" in result.output
+
+    state = load_state(default_state_path())
+    assert 19412 in state.roms
+
+
+@respx.mock
 def test_reconcile_skips_already_tracked_files(tmp_path: Path, monkeypatch) -> None:
     """Walker excludes files already in state → reconcile is idempotent."""
     monkeypatch.setenv("HOME", str(tmp_path))

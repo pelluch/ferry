@@ -222,21 +222,21 @@ def _classify_all_orphans(
         if platform is None:
             # No RomM platform maps to this disk dir; everything is NoMatch.
             for orphan in orphans_in_dir:
-                out.append(classify(orphan, by_name={}, by_hash={}))
+                out.append(classify(orphan, by_name={}, by_hash={}, by_stem={}))
             continue
         platform_id = platform.get("id")
         if not isinstance(platform_id, int):
             for orphan in orphans_in_dir:
-                out.append(classify(orphan, by_name={}, by_hash={}))
+                out.append(classify(orphan, by_name={}, by_hash={}, by_stem={}))
             continue
         click.echo(
             f"  fetching ROMs for platform {platform.get('slug')!r} "
             f"({len(orphans_in_dir)} orphan(s))…"
         )
         roms = api.list_roms(platform_ids=[platform_id])
-        by_name, by_hash = build_index(roms)
+        by_name, by_hash, by_stem = build_index(roms)
         for orphan in orphans_in_dir:
-            out.append(classify(orphan, by_name=by_name, by_hash=by_hash))
+            out.append(classify(orphan, by_name=by_name, by_hash=by_hash, by_stem=by_stem))
     return out
 
 
