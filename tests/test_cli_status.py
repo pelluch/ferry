@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from ferry.adapters.sidecar import write_sidecar
@@ -455,3 +456,141 @@ def test_status_honors_configured_dolphin_install(tmp_path: Path, monkeypatch) -
     assert result.exit_code == 0, result.output
     assert "dolphin:     native" in result.output
     assert "selected via [saves].dolphin_install" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Launch-hook drift surfacing in `ferry status`
+# ---------------------------------------------------------------------------
+
+
+def _bundled_xml(extra: str = "") -> str:
+    return (
+        '<?xml version="1.0"?>\n<systemList>\n'
+        "  <system>\n"
+        "    <name>gba</name>\n"
+        "    <fullname>Game Boy Advance</fullname>\n"
+        "    <path>%ROMPATH%/gba</path>\n"
+        f"    <extension>.gba .GBA{extra}</extension>\n"
+        "    <command>retroarch -L core %ROM%</command>\n"
+        "    <platform>gba</platform>\n"
+        "    <theme>gba</theme>\n"
+        "  </system>\n"
+        "</systemList>\n"
+    )
+
+
+@pytest.fixture
+def patched_native_profiles_for_status(monkeypatch, tmp_path: Path) -> Path:
+    bundled = (
+        Path.home()
+        / "fake-usr"
+        / "share"
+        / "es-de"
+        / "resources"
+        / "systems"
+        / "linux"
+        / "es_systems.xml"
+    )
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text(_bundled_xml())
+    fake_profiles = (
+        (
+            "retrodeck-flatpak",
+            tmp_path / "no-such-flatpak",
+            ".var/app/net.retrodeck.retrodeck/config/ES-DE/custom_systems/es_systems.xml",
+        ),
+        (
+            "native",
+            bundled,
+            "ES-DE/custom_systems/es_systems.xml",
+        ),
+    )
+    monkeypatch.setattr("ferry.adapters.esde_paths._PROFILES", fake_profiles)
+    return bundled
+
+
+def test_status_hooks_not_installed_when_no_snapshot_no_block(
+    tmp_path: Path, patched_native_profiles_for_status: Path
+) -> None:
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "hooks:     not installed" in result.output
+
+
+def test_status_hooks_clean_after_install(
+    tmp_path: Path, patched_native_profiles_for_status: Path
+) -> None:
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    runner.invoke(app, ["--config", str(cfg), "install-launch-hooks"], env={})
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "hooks:     ✓ installed and in sync" in result.output
+
+
+def test_status_hooks_upstream_drift(
+    tmp_path: Path, patched_native_profiles_for_status: Path
+) -> None:
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    runner.invoke(app, ["--config", str(cfg), "install-launch-hooks"], env={})
+
+    # Simulate upstream change.
+    patched_native_profiles_for_status.write_text(_bundled_xml(extra=" .added"))
+
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "⚠ bundled changed" in result.output
+    assert "re-run `ferry install-launch-hooks`" in result.output
+
+
+def test_status_hooks_local_drift(tmp_path: Path, patched_native_profiles_for_status: Path) -> None:
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    runner.invoke(app, ["--config", str(cfg), "install-launch-hooks"], env={})
+
+    custom = Path.home() / "ES-DE" / "custom_systems" / "es_systems.xml"
+    text = custom.read_text()
+    custom.write_text(text.replace(".gba .GBA", ".gba .GBA .foo"))
+
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "⚠ managed block edited locally" in result.output
+    assert "--force" in result.output
+
+
+def test_status_hooks_both_drift_dimensions(
+    tmp_path: Path, patched_native_profiles_for_status: Path
+) -> None:
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    runner.invoke(app, ["--config", str(cfg), "install-launch-hooks"], env={})
+
+    patched_native_profiles_for_status.write_text(_bundled_xml(extra=" .added"))
+    custom = Path.home() / "ES-DE" / "custom_systems" / "es_systems.xml"
+    text = custom.read_text()
+    custom.write_text(text.replace(".gba .GBA", ".gba .GBA .foo"))
+
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "bundled changed AND managed block edited" in result.output
+
+
+def test_status_hooks_block_present_but_no_snapshot(
+    tmp_path: Path, patched_native_profiles_for_status: Path
+) -> None:
+    """Pre-ck3c upgrade case: managed block exists but no snapshot file."""
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    runner.invoke(app, ["--config", str(cfg), "install-launch-hooks"], env={})
+
+    # Remove the snapshot file but leave block in place.
+    from ferry.services.launch_hooks import default_snapshot_path
+
+    default_snapshot_path().unlink()
+
+    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
+    assert result.exit_code == 0, result.output
+    assert "managed block present but no drift snapshot" in result.output

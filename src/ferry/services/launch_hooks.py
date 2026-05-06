@@ -26,11 +26,14 @@ the wrapper script. Uninstall removes both.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -291,3 +294,201 @@ def _insert_before_close(text: str, block: str) -> str:
 def _escape_re_replacement(s: str) -> str:
     """Escape backslashes in `s` so `re.sub` treats it literally."""
     return s.replace("\\", "\\\\")
+
+
+# ---------------------------------------------------------------------------
+# Drift snapshot — track what we wrote so `status` / `sync` can detect
+# both upstream drift (bundled file changed under us) and local drift
+# (user edited our managed block).
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_FILENAME = "launch-hooks.snapshot.json"
+_SNAPSHOT_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Snapshot:
+    """Persisted record of what `install-launch-hooks` last wrote.
+
+    `bundled_path` and `custom_systems_path` pin the install we wrote
+    against — `status` and `sync` re-hash these and compare to the
+    stored SHAs to detect drift. Stored at
+    `$XDG_STATE_HOME/ferry/launch-hooks.snapshot.json`.
+    """
+
+    bundled_path: Path
+    bundled_sha256: str
+    custom_systems_path: Path
+    managed_block_sha256: str
+    installed_at: str  # ISO8601 UTC string
+    version: int = _SNAPSHOT_VERSION
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HookStatus:
+    """Drift report comparing a `Snapshot` against current disk state.
+
+    `current_bundled_sha` is None when the bundled file no longer exists
+    (e.g., RetroDECK update relocated it). `current_block_sha` is None
+    when the managed block was removed from custom_systems (e.g., user
+    deleted the file or hand-stripped the block).
+    """
+
+    snapshot: Snapshot
+    current_bundled_sha: str | None
+    current_block_sha: str | None
+
+    @property
+    def bundled_present(self) -> bool:
+        return self.current_bundled_sha is not None
+
+    @property
+    def block_present(self) -> bool:
+        return self.current_block_sha is not None
+
+    @property
+    def upstream_drift(self) -> bool:
+        """Bundled file's content changed since install."""
+        return self.bundled_present and self.current_bundled_sha != self.snapshot.bundled_sha256
+
+    @property
+    def local_drift(self) -> bool:
+        """Managed block's content changed since install (user edited it)."""
+        return self.block_present and self.current_block_sha != self.snapshot.managed_block_sha256
+
+    @property
+    def is_clean(self) -> bool:
+        """Both files present and both SHAs match what we wrote."""
+        return (
+            self.bundled_present
+            and self.block_present
+            and not self.upstream_drift
+            and not self.local_drift
+        )
+
+
+def default_snapshot_path(env: dict | None = None) -> Path:
+    """`$XDG_STATE_HOME/ferry/launch-hooks.snapshot.json`."""
+    env = env if env is not None else os.environ
+    base = env.get("XDG_STATE_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "state"
+    return root / "ferry" / _SNAPSHOT_FILENAME
+
+
+def compute_file_sha256(path: Path) -> str:
+    """SHA-256 of a file's bytes. Streams in 64KB chunks."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(64 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def extract_managed_block(custom_path: Path) -> str | None:
+    """Return the markers + body matched by `_MANAGED_BLOCK_RE`, or None.
+
+    None when the file doesn't exist or contains no managed block.
+    The returned substring is exactly what the SHA is computed over —
+    `compute_managed_block_sha256` and the snapshot writer must agree
+    on this so drift comparisons are stable.
+    """
+    if not custom_path.is_file():
+        return None
+    text = custom_path.read_text()
+    match = _MANAGED_BLOCK_RE.search(text)
+    return match.group(0) if match else None
+
+
+def compute_managed_block_sha256(custom_path: Path) -> str | None:
+    """SHA-256 of the managed block (markers + body), or None if absent."""
+    block = extract_managed_block(custom_path)
+    if block is None:
+        return None
+    return hashlib.sha256(block.encode("utf-8")).hexdigest()
+
+
+def write_snapshot(path: Path, snapshot: Snapshot) -> None:
+    """Serialize a Snapshot to JSON at `path` (parent dir created)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": snapshot.version,
+        "bundled_path": str(snapshot.bundled_path),
+        "bundled_sha256": snapshot.bundled_sha256,
+        "custom_systems_path": str(snapshot.custom_systems_path),
+        "managed_block_sha256": snapshot.managed_block_sha256,
+        "installed_at": snapshot.installed_at,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def read_snapshot(path: Path) -> Snapshot | None:
+    """Return the persisted Snapshot, or None when missing or unreadable.
+
+    Treats malformed JSON / missing keys / unknown versions the same as
+    "absent" — the user can re-run `install-launch-hooks` to rewrite a
+    valid snapshot.
+    """
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    try:
+        version = int(data.get("version", _SNAPSHOT_VERSION))
+        if version != _SNAPSHOT_VERSION:
+            return None
+        return Snapshot(
+            bundled_path=Path(data["bundled_path"]),
+            bundled_sha256=data["bundled_sha256"],
+            custom_systems_path=Path(data["custom_systems_path"]),
+            managed_block_sha256=data["managed_block_sha256"],
+            installed_at=data["installed_at"],
+            version=version,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def delete_snapshot(path: Path) -> bool:
+    """Remove the snapshot file. Returns True iff it existed."""
+    if path.is_file():
+        path.unlink()
+        return True
+    return False
+
+
+def make_snapshot(*, bundled_path: Path, custom_systems_path: Path) -> Snapshot:
+    """Capture current bundled + managed-block state as a fresh Snapshot.
+
+    Call this AFTER `install_managed_block` writes the file — both SHAs
+    are computed by reading from disk, which guarantees they match what
+    `extract_managed_block` / `compute_file_sha256` will produce on
+    subsequent drift checks.
+    """
+    block_sha = compute_managed_block_sha256(custom_systems_path)
+    if block_sha is None:
+        raise ValueError(
+            f"managed block not found in {custom_systems_path} — "
+            "install_managed_block must run before make_snapshot."
+        )
+    return Snapshot(
+        bundled_path=bundled_path,
+        bundled_sha256=compute_file_sha256(bundled_path),
+        custom_systems_path=custom_systems_path,
+        managed_block_sha256=block_sha,
+        installed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def detect_drift(snapshot: Snapshot) -> HookStatus:
+    """Compare snapshot against current disk state and report drift."""
+    bundled_sha = (
+        compute_file_sha256(snapshot.bundled_path) if snapshot.bundled_path.is_file() else None
+    )
+    block_sha = compute_managed_block_sha256(snapshot.custom_systems_path)
+    return HookStatus(
+        snapshot=snapshot,
+        current_bundled_sha=bundled_sha,
+        current_block_sha=block_sha,
+    )

@@ -23,12 +23,19 @@ from ferry.adapters.esde_paths import (
 from ferry.config import ConfigError, load_config
 from ferry.config.schema import LaunchHooksConfig
 from ferry.services.launch_hooks import (
+    HookStatus,
     WrapperConfig,
+    default_snapshot_path,
     default_wrapper_path,
+    delete_snapshot,
+    detect_drift,
     install_managed_block,
+    make_snapshot,
+    read_snapshot,
     render_managed_block,
     render_wrapper_script,
     uninstall_managed_block,
+    write_snapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,8 +53,18 @@ logger = logging.getLogger(__name__)
     is_flag=True,
     help="Show what would be written without modifying anything.",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Overwrite the managed block even if local edits are detected. "
+        "Without this, ferry refuses to clobber hand-edits to the block."
+    ),
+)
 @click.pass_context
-def install_launch_hooks(ctx: click.Context, profile: str | None, dry_run: bool) -> None:
+def install_launch_hooks(
+    ctx: click.Context, profile: str | None, dry_run: bool, force: bool
+) -> None:
     """Wire `ferry sync --rom` into ES-DE's launch chain (pre + post)."""
     try:
         loaded = load_config(ctx.obj.get("config_path"))
@@ -75,6 +92,37 @@ def install_launch_hooks(ctx: click.Context, profile: str | None, dry_run: bool)
     wrapper_script = render_wrapper_script(wrapper_config)
     managed_block = render_managed_block(install.bundled_systems_xml, wrapper_path)
 
+    snapshot_path = default_snapshot_path()
+    existing_snapshot = read_snapshot(snapshot_path)
+    drift = detect_drift(existing_snapshot) if existing_snapshot is not None else None
+
+    # Local-drift gate: refuse to clobber hand-edits unless --force.
+    if drift is not None and drift.local_drift and not force:
+        if dry_run:
+            # In dry-run we still show the full preview but flag the gate so
+            # the user knows the real run will refuse without --force.
+            click.echo(
+                f"⚠ managed block in {install.custom_systems_xml} has been edited "
+                "since the last `ferry install-launch-hooks`."
+            )
+            click.echo(
+                "  A real run would REFUSE to overwrite without --force. "
+                "Either copy your edits aside and re-run, or pass --force "
+                "to clobber them."
+            )
+            click.echo("")
+        else:
+            raise click.ClickException(
+                f"managed block in {install.custom_systems_xml} has been edited "
+                "since the last `ferry install-launch-hooks`. Re-running would "
+                "overwrite those edits.\n\n"
+                "Either:\n"
+                "  - copy your edits aside, re-run install-launch-hooks, then re-apply, or\n"
+                "  - re-run with --force to overwrite (your edits will be lost)."
+            )
+
+    n_systems = managed_block.count("<system>")
+
     if dry_run:
         click.echo(f"Would write wrapper script: {wrapper_path}")
         click.echo(
@@ -82,8 +130,9 @@ def install_launch_hooks(ctx: click.Context, profile: str | None, dry_run: bool)
             f"  log: {wrapper_config.log_path or '(disabled)'}"
         )
         click.echo(f"Would update custom_systems: {install.custom_systems_xml}")
-        n_systems = managed_block.count("<system>")
         click.echo(f"  Managed block: {n_systems} system(s) wrapped")
+        click.echo(f"Would write snapshot: {snapshot_path}")
+        _print_install_drift_preview(drift)
         click.echo("(dry run — no files modified)")
         return
 
@@ -93,8 +142,14 @@ def install_launch_hooks(ctx: click.Context, profile: str | None, dry_run: bool)
     click.echo(f"✓ wrote wrapper script: {wrapper_path}")
 
     install_managed_block(install.custom_systems_xml, managed_block)
-    n_systems = managed_block.count("<system>")
     click.echo(f"✓ updated {install.custom_systems_xml}: {n_systems} system(s) wrapped")
+
+    snapshot = make_snapshot(
+        bundled_path=install.bundled_systems_xml,
+        custom_systems_path=install.custom_systems_xml,
+    )
+    write_snapshot(snapshot_path, snapshot)
+    click.echo(f"✓ wrote drift snapshot: {snapshot_path}")
 
     click.echo("")
     click.echo(
@@ -117,6 +172,7 @@ def uninstall_launch_hooks(ctx: click.Context, profile: str | None) -> None:
     """Remove ferry's launch-hook wrappers + wrapper script."""
     install = _select_install(profile)
     wrapper_path = default_wrapper_path()
+    snapshot_path = default_snapshot_path()
 
     removed = uninstall_managed_block(install.custom_systems_xml)
     if removed:
@@ -130,8 +186,55 @@ def uninstall_launch_hooks(ctx: click.Context, profile: str | None) -> None:
     else:
         click.echo(f"  wrapper script {wrapper_path} not present (nothing to remove)")
 
+    if delete_snapshot(snapshot_path):
+        click.echo(f"✓ removed drift snapshot: {snapshot_path}")
+    else:
+        click.echo(f"  drift snapshot {snapshot_path} not present (nothing to remove)")
+
     click.echo("")
     click.echo("Restart ES-DE so it re-reads custom_systems and uses bundled commands again.")
+
+
+def _print_install_drift_preview(drift: HookStatus | None) -> None:
+    """Tell the user what the snapshot vs disk look like in dry-run.
+
+    Mirrors the `status`-side rendering (`format_hook_status_line`) so the
+    dry-run preview describes the same drift state the user would see in
+    `ferry status` if they ran it instead.
+    """
+    if drift is None:
+        click.echo("Drift status: no snapshot — clean install (would write fresh snapshot)")
+        return
+    if drift.is_clean:
+        click.echo("Drift status: ✓ snapshot matches disk — re-running is a no-op")
+        return
+    if drift.upstream_drift and drift.local_drift:
+        click.echo(
+            "Drift status: ⚠ bundled file changed AND managed block edited — "
+            "real run requires --force (clobbers local edits)"
+        )
+        return
+    if drift.upstream_drift:
+        click.echo(
+            "Drift status: ⚠ bundled file changed — real run rebuilds managed "
+            "block from new bundled"
+        )
+        return
+    if drift.local_drift:
+        click.echo(
+            "Drift status: ⚠ managed block edited locally — real run requires "
+            "--force (clobbers your edits)"
+        )
+        return
+    if not drift.bundled_present:
+        click.echo(
+            "Drift status: ⚠ bundled file from snapshot is missing — real run "
+            "rebuilds against the currently-discovered bundled file"
+        )
+        return
+    if not drift.block_present:
+        click.echo("Drift status: ⚠ managed block was removed since install — real run re-adds it")
+        return
 
 
 def _select_install(profile: str | None) -> ESDEInstall:

@@ -72,14 +72,11 @@ def test_retrodeck_bundled_resolved_via_glob(tmp_path: Path) -> None:
     We glob to find whichever runtime hash is installed. Highest-sorted
     candidate wins (last entry after sort)."""
     fp_root = tmp_path / "fake-flatpak/net.retrodeck.retrodeck"
-    older_bundled = (
-        fp_root
-        / "x86_64/stable/aaa1111/files/retrodeck/components/es-de/share/es-de/resources/systems/linux/es_systems.xml"
+    bundled_rel = (
+        "files/retrodeck/components/es-de/share/es-de/resources/systems/linux/es_systems.xml"
     )
-    newer_bundled = (
-        fp_root
-        / "x86_64/stable/zzz9999/files/retrodeck/components/es-de/share/es-de/resources/systems/linux/es_systems.xml"
-    )
+    older_bundled = fp_root / "x86_64/stable/aaa1111" / bundled_rel
+    newer_bundled = fp_root / "x86_64/stable/zzz9999" / bundled_rel
     for f in (older_bundled, newer_bundled):
         f.parent.mkdir(parents=True)
         f.write_text("<systemList/>")

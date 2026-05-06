@@ -49,6 +49,11 @@ from ferry.domain.sync_plan import (
     compute_plan,
 )
 from ferry.services.dolphin_save_backend import DolphinSaveBackend
+from ferry.services.launch_hooks import (
+    default_snapshot_path,
+    detect_drift,
+    read_snapshot,
+)
 from ferry.services.save_backend import (
     RetroArchSaveBackend,
     SaveSyncResult,
@@ -146,6 +151,8 @@ def sync(
             f"{e.lock_path}).\nWait for it to finish, or check `ps -p {e.pid}` "
             "if you suspect it's stuck."
         ) from e
+
+    _warn_on_launch_hook_upstream_drift()
 
 
 def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool) -> None:
@@ -317,6 +324,31 @@ def _run_saves_only(
         # explicitly invoked it; saves-only is more often run from automation
         # (launch hooks) where we want to fail soft.
         click.echo(f"save sync skipped: {e}")
+
+
+def _warn_on_launch_hook_upstream_drift() -> None:
+    """Emit a tail-of-output warning when the bundled ES-DE systems file
+    changed since `install-launch-hooks` last ran.
+
+    Surfaces the same condition `ferry status` reports, but in the sync
+    output so the systemd-timer's regular runs flag it without the user
+    needing to remember to run status. Local-drift-only is intentionally
+    NOT echoed here — it's user-controlled (they edited the file), so
+    nagging on every timer fire would be noise. They'll see it on next
+    `ferry status`.
+    """
+    snapshot = read_snapshot(default_snapshot_path())
+    if snapshot is None:
+        return
+    drift = detect_drift(snapshot)
+    if not drift.upstream_drift:
+        return
+    click.echo("")
+    click.echo(
+        "⚠ launch hooks: bundled `es_systems.xml` changed since "
+        "`ferry install-launch-hooks` last ran. Re-run that command to "
+        "refresh the managed block. (`ferry status` shows full drift state.)"
+    )
 
 
 def _find_rom_by_path(state: LibraryState, rom_path: Path) -> RomState | None:

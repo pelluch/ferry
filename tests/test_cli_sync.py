@@ -871,3 +871,129 @@ def test_dry_run_skips_save_sync(tmp_path: Path, monkeypatch) -> None:
     # need to confirm Save sync doesn't appear. Library calls will fail, so we
     # tolerate non-zero exit and just check the absence of save-sync output.
     assert "Save sync:" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Launch-hook upstream-drift warning at end of sync
+# ---------------------------------------------------------------------------
+
+
+def _write_minimal_snapshot(tmp_path: Path, *, bundled_sha: str, block_sha: str = "b" * 64) -> Path:
+    """Plant a launch-hooks snapshot with the given SHAs.
+
+    Saves-only --dry-run with no [saves] section is the cheapest sync
+    invocation that exercises the post-with-block warning path: it
+    short-circuits inside _run_saves_only without any HTTP calls.
+    """
+    bundled = tmp_path / "fake-bundled.xml"
+    bundled.write_text("dummy bundled content")
+
+    snapshot_path = tmp_path / ".local" / "state" / "ferry" / "launch-hooks.snapshot.json"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "bundled_path": str(bundled),
+                "bundled_sha256": bundled_sha,
+                "custom_systems_path": str(tmp_path / "custom.xml"),
+                "managed_block_sha256": block_sha,
+                "installed_at": "2026-05-05T00:00:00Z",
+            }
+        )
+    )
+    return bundled
+
+
+def test_sync_warns_when_bundled_has_drifted(tmp_path: Path, monkeypatch) -> None:
+    """Bundled file's SHA differs from snapshot → warning at end of sync."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = write_config(tmp_path / "config.toml")
+    # Plant snapshot whose bundled_sha doesn't match the file we wrote.
+    _write_minimal_snapshot(tmp_path, bundled_sha="0" * 64)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--saves-only", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "⚠ launch hooks: bundled" in result.output
+    assert "ferry install-launch-hooks" in result.output
+
+
+def test_sync_no_warning_when_bundled_matches_snapshot(tmp_path: Path, monkeypatch) -> None:
+    """Bundled SHA matches snapshot → no drift warning."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = write_config(tmp_path / "config.toml")
+    bundled = _write_minimal_snapshot(tmp_path, bundled_sha="0" * 64)
+    # Re-write snapshot with the actual SHA of the bundled file.
+    import hashlib as hl
+    import json
+
+    actual_sha = hl.sha256(bundled.read_bytes()).hexdigest()
+    snapshot_path = tmp_path / ".local" / "state" / "ferry" / "launch-hooks.snapshot.json"
+    data = json.loads(snapshot_path.read_text())
+    data["bundled_sha256"] = actual_sha
+    snapshot_path.write_text(json.dumps(data))
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--saves-only", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "⚠ launch hooks:" not in result.output
+
+
+def test_sync_no_warning_when_no_snapshot(tmp_path: Path, monkeypatch) -> None:
+    """No snapshot at all → no warning (user hasn't installed hooks)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--saves-only", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "⚠ launch hooks:" not in result.output
+
+
+def test_sync_no_warning_for_local_drift_only(tmp_path: Path, monkeypatch) -> None:
+    """Local-drift only is shown in `status`; sync stays quiet to avoid timer noise."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = write_config(tmp_path / "config.toml")
+
+    # Plant a real custom_systems file with a managed block, then snapshot
+    # whose block SHA *doesn't* match — but bundled SHA *does* match.
+    from ferry.services.launch_hooks import (
+        compute_file_sha256,
+        compute_managed_block_sha256,
+        install_managed_block,
+    )
+
+    bundled = tmp_path / "fake-bundled.xml"
+    bundled.write_text("dummy bundled content")
+    custom = tmp_path / "custom.xml"
+    install_managed_block(custom, "    <system><name>gba</name></system>")
+
+    bundled_sha = compute_file_sha256(bundled)
+    block_sha = compute_managed_block_sha256(custom)
+
+    snapshot_path = tmp_path / ".local" / "state" / "ferry" / "launch-hooks.snapshot.json"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "bundled_path": str(bundled),
+                "bundled_sha256": bundled_sha,
+                "custom_systems_path": str(custom),
+                "managed_block_sha256": block_sha,
+                "installed_at": "2026-05-05T00:00:00Z",
+            }
+        )
+    )
+
+    # Edit the managed block (local drift only).
+    custom.write_text(custom.read_text().replace("<name>gba</name>", "<name>snes</name>"))
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--saves-only", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "⚠ launch hooks:" not in result.output
