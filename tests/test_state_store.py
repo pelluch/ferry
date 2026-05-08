@@ -2,17 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from ferry.adapters.sidecar import sidecar_path_for, write_sidecar
 from ferry.adapters.state_store import (
     StateDecodeError,
     StateSchemaError,
     default_state_path,
-    ensure_sidecars,
     load_state,
-    recover_state_from_sidecars,
     save_state,
 )
-from ferry.domain.destination import Destination
 from ferry.domain.state import CURRENT_SCHEMA_VERSION, LibraryState
 
 # ---------------------------------------------------------------------------
@@ -93,116 +89,3 @@ def test_save_overwrites_previous_state(tmp_path: Path, make_rom) -> None:
     save_state(LibraryState(roms={2: make_rom(2)}), target)
     loaded = load_state(target)
     assert set(loaded.roms) == {2}
-
-
-# ---------------------------------------------------------------------------
-# Sidecar recovery — rebuild state from on-disk sidecars
-# ---------------------------------------------------------------------------
-
-
-def test_recovery_returns_empty_state_when_no_sidecars(tmp_path: Path) -> None:
-    state = recover_state_from_sidecars(tmp_path)
-    assert state.roms == {}
-
-
-def test_recovery_finds_sidecars_under_roots(tmp_path: Path, make_rom) -> None:
-    roms_base = tmp_path / "ROMs"
-    a = roms_base / "gc" / "A.iso"
-    b = roms_base / "snes" / "B.smc"
-    write_sidecar(a, make_rom(rom_id=1, name="A"), roms_base=roms_base)
-    write_sidecar(b, make_rom(rom_id=2, name="B"), roms_base=roms_base)
-
-    recovered = recover_state_from_sidecars(roms_base)
-    assert set(recovered.roms) == {1, 2}
-    assert recovered.roms[1].name == "A"
-    assert recovered.roms[2].name == "B"
-
-
-def test_recovery_picks_up_legacy_sidecars_in_rom_tree(tmp_path: Path, make_rom) -> None:
-    """Pre-relocation v2 sidecars next-to-rom are still surfaced for recovery."""
-    from ferry.adapters.sidecar import legacy_sidecar_paths_for
-    from ferry.domain.state import rom_to_json
-
-    roms_base = tmp_path / "ROMs"
-    primary = roms_base / "gc" / "Legacy.iso"
-    primary.parent.mkdir(parents=True)
-    dot, _plain = legacy_sidecar_paths_for(primary)
-    dot.write_text(rom_to_json(make_rom(rom_id=99, name="Legacy")))
-
-    recovered = recover_state_from_sidecars(roms_base)
-    assert set(recovered.roms) == {99}
-
-
-def test_recovery_skips_malformed_sidecars(tmp_path: Path, make_rom) -> None:
-    roms_base = tmp_path / "ROMs"
-    good = roms_base / "gc" / "Good.iso"
-    write_sidecar(good, make_rom(rom_id=42), roms_base=roms_base)
-    # Drop a corrupt sidecar in a place find_sidecars walks.
-    from ferry.adapters.sidecar import default_sidecars_root
-
-    bad = default_sidecars_root() / "gc" / "Bad.iso.ferry.json"
-    bad.parent.mkdir(parents=True, exist_ok=True)
-    bad.write_text("{ not json")
-
-    recovered = recover_state_from_sidecars(roms_base)
-    assert set(recovered.roms) == {42}  # corrupt one skipped, not raised
-
-
-def test_recovery_returns_empty_when_root_does_not_exist(tmp_path: Path) -> None:
-    recovered = recover_state_from_sidecars(tmp_path / "nope")
-    assert recovered.roms == {}
-
-
-# ---------------------------------------------------------------------------
-# ensure_sidecars — regenerate missing sidecars from in-memory state
-# ---------------------------------------------------------------------------
-
-
-def _destination(tmp_path: Path) -> Destination:
-    return Destination(roms_base=tmp_path / "ROMs", bios_base=None, preset="esde-native")
-
-
-def test_ensure_sidecars_regenerates_missing(tmp_path: Path, make_rom) -> None:
-    """User deletes only the sidecar; primary still on disk → sidecar restored."""
-    dest = _destination(tmp_path)
-    primary = dest.roms_base / "gc" / "Pikmin.iso"
-    primary.parent.mkdir(parents=True)
-    primary.write_bytes(b"data")
-    rom = make_rom(rom_id=1)  # default outputs path is "gc/Pikmin.iso"
-    state = LibraryState(roms={1: rom})
-
-    # No sidecar yet.
-    assert not sidecar_path_for(primary, roms_base=dest.roms_base).exists()
-
-    count = ensure_sidecars(state, dest)
-    assert count == 1
-    assert sidecar_path_for(primary, roms_base=dest.roms_base).exists()
-
-
-def test_ensure_sidecars_skips_existing(tmp_path: Path, make_rom) -> None:
-    dest = _destination(tmp_path)
-    primary = dest.roms_base / "gc" / "Pikmin.iso"
-    primary.parent.mkdir(parents=True)
-    primary.write_bytes(b"data")
-    rom = make_rom(rom_id=1)
-    write_sidecar(primary, rom, roms_base=dest.roms_base)  # already there
-    state = LibraryState(roms={1: rom})
-
-    count = ensure_sidecars(state, dest)
-    assert count == 0
-
-
-def test_ensure_sidecars_skips_when_primary_missing(tmp_path: Path, make_rom) -> None:
-    """If the primary file is gone too, the planner's redownload path handles it."""
-    dest = _destination(tmp_path)
-    rom = make_rom(rom_id=1)
-    # No primary file on disk at all.
-    state = LibraryState(roms={1: rom})
-
-    count = ensure_sidecars(state, dest)
-    assert count == 0
-    # Sidecar deliberately not written — it would be at a phantom path.
-    primary_abs = dest.roms_base / rom.primary_output.path
-    # roms_base may not exist on disk yet; explicitly compute path without relying on it.
-    canonical = sidecar_path_for(primary_abs, roms_base=dest.roms_base)
-    assert not canonical.exists()

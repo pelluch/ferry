@@ -2,7 +2,7 @@
 classify them against a per-platform RomM index, synthesize `RomState`
 entries for confident matches.
 
-No HTTP, no sidecar I/O, no state.json writes — those live in
+No HTTP, no state.json writes — those live in
 `cli/reconcile.py`. This module is the testable core.
 
 **Classification model** (mirrors what `cli/reconcile.py` displays):
@@ -35,10 +35,6 @@ from pathlib import Path
 from typing import Any
 
 from ferry.adapters.orphan_hash import hash_file_bytes, hash_orphan_file
-from ferry.adapters.sidecar import (
-    SIDECAR_SUFFIX,
-    sidecar_path_for,
-)
 from ferry.domain.rom_files import resolve_local_filename
 from ferry.domain.state import LibraryState, RomState, TransformedOutput
 
@@ -47,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class OrphanCandidate:
-    """A local file with no tracked sidecar — a reconcile candidate."""
+    """A local file not present in state.roms — a reconcile candidate."""
 
     abs_path: Path
     rel_path: Path  # relative to roms_base
@@ -122,7 +118,6 @@ Classification = Confident | NameOnly | HashOnly | Ambiguous | NoMatch
 def find_orphans(
     *,
     roms_base: Path,
-    sidecars_root: Path,
     state: LibraryState,
     platform_filter: str | None = None,
 ) -> list[OrphanCandidate]:
@@ -130,10 +125,7 @@ def find_orphans(
 
     Excludes:
       - files tracked in `state.roms[*].outputs[*].path`,
-      - files whose canonical sidecar exists under `sidecars_root`,
-      - sidecar files themselves (`*.ferry.json`),
-      - dotfiles (KDE droppings, legacy v2 sidecars that survived the
-        migration sweep, etc.),
+      - dotfiles (KDE droppings, etc.),
       - files at the top level of `roms_base` (must be inside a
         platform-shaped subdir).
 
@@ -161,17 +153,11 @@ def find_orphans(
                 continue
             if path.name.startswith("."):
                 continue
-            if path.name.endswith(SIDECAR_SUFFIX):
-                continue
             if path in tracked_paths:
                 continue
             try:
                 rel = path.relative_to(roms_base)
             except ValueError:  # symlinks pointing outside the tree
-                continue
-            if sidecar_path_for(path, roms_base=roms_base, sidecars_root=sidecars_root).exists():
-                # Sidecar present but not in state — recovery will pick this
-                # up next sync; reconcile shouldn't double-claim it.
                 continue
             out.append(
                 OrphanCandidate(

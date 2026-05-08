@@ -1,7 +1,7 @@
 """Compute the identifying hash of a local file the way RomM does.
 
 When ferry's `reconcile` flow walks the ROM tree for orphan files
-(no sidecar, not in state.json), it needs to compute an md5 it can
+(not in state.json), it needs to compute an md5 it can
 match against `RomFileSchema.md5_hash` from RomM's API. RomM's
 hashing convention (see `selfhosted/romm/backend/handler/filesystem/
 roms_handler.py:_calculate_rom_hashes`) is:

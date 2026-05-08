@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from ferry.adapters.sidecar import write_sidecar
 from ferry.adapters.state_store import default_state_path, save_state
 from ferry.cli import app
 from ferry.domain.state import LibraryState, RomState, TransformedOutput
@@ -64,12 +63,11 @@ def test_status_with_populated_state_all_present(tmp_path: Path, monkeypatch) ->
     rom2 = make_rom(2, name="B")
     save_state(LibraryState(roms={1: rom1, 2: rom2}), default_state_path())
 
-    # Place primaries + sidecars.
+    # Place primaries on disk.
     for rom in (rom1, rom2):
         primary = roms_base / rom.primary_output.path
         primary.parent.mkdir(parents=True, exist_ok=True)
         primary.write_bytes(b"x")
-        write_sidecar(primary, rom, roms_base=roms_base)
 
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
@@ -95,25 +93,6 @@ def test_status_flags_missing_primary(tmp_path: Path, monkeypatch) -> None:
     assert "1 missing on disk" in result.output
     assert "Issues:" in result.output
     assert "re-download" in result.output
-
-
-def test_status_flags_missing_sidecar(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    roms_base = tmp_path / "roms"
-    cfg = write_config(tmp_path / "config.toml", roms_base=roms_base)
-
-    rom = make_rom(1)
-    save_state(LibraryState(roms={1: rom}), default_state_path())
-    primary = roms_base / rom.primary_output.path
-    primary.parent.mkdir(parents=True)
-    primary.write_bytes(b"x")
-    # Skip writing sidecar.
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["--config", str(cfg), "status"], env={})
-    assert result.exit_code == 0, result.output
-    assert "1 missing sidecars" in result.output
-    assert "regenerate" in result.output
 
 
 def test_status_summarizes_trash(tmp_path: Path, monkeypatch) -> None:

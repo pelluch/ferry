@@ -8,11 +8,6 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from ferry.adapters.sidecar import (
-    SIDECAR_PREFIX,
-    SIDECAR_SUFFIX,
-    write_sidecar,
-)
 from ferry.domain.state import LibraryState, RomState, TransformedOutput
 from ferry.services.reconcile import (
     Ambiguous,
@@ -66,20 +61,12 @@ def _file_payload(
 
 
 def test_find_orphans_returns_empty_when_roms_base_missing(tmp_path: Path) -> None:
-    assert (
-        find_orphans(
-            roms_base=tmp_path / "missing",
-            sidecars_root=tmp_path / "sidecars",
-            state=LibraryState(),
-        )
-        == []
-    )
+    assert find_orphans(roms_base=tmp_path / "missing", state=LibraryState()) == []
 
 
 def test_find_orphans_skips_tracked_files(tmp_path: Path, make_rom) -> None:
     """A file listed in `state.roms[*].outputs[*].path` is NOT an orphan."""
     roms_base = tmp_path / "ROMs"
-    sidecars_root = tmp_path / "state" / "sidecars"
     primary = roms_base / "gba" / "Tracked.gba"
     primary.parent.mkdir(parents=True)
     primary.write_bytes(b"x")
@@ -89,59 +76,31 @@ def test_find_orphans_skips_tracked_files(tmp_path: Path, make_rom) -> None:
         primary_output_index=0,
     )
 
-    orphans = find_orphans(
-        roms_base=roms_base,
-        sidecars_root=sidecars_root,
-        state=LibraryState(roms={1: rom}),
-    )
+    orphans = find_orphans(roms_base=roms_base, state=LibraryState(roms={1: rom}))
     assert orphans == []
 
 
 def test_find_orphans_returns_untracked_files(tmp_path: Path) -> None:
     roms_base = tmp_path / "ROMs"
-    sidecars_root = tmp_path / "state" / "sidecars"
     target = roms_base / "gba" / "Loose.gba"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"x")
 
-    orphans = find_orphans(roms_base=roms_base, sidecars_root=sidecars_root, state=LibraryState())
+    orphans = find_orphans(roms_base=roms_base, state=LibraryState())
     assert len(orphans) == 1
     assert orphans[0].abs_path == target
     assert orphans[0].rel_path == Path("gba/Loose.gba")
     assert orphans[0].platform_dir == "gba"
 
 
-def test_find_orphans_skips_files_with_canonical_sidecar(tmp_path: Path, make_rom) -> None:
-    """A file with a canonical sidecar but no state entry is mid-recovery —
-    don't double-claim it as an orphan."""
+def test_find_orphans_skips_dotfiles(tmp_path: Path) -> None:
     roms_base = tmp_path / "ROMs"
-    sidecars_root = tmp_path / "state" / "sidecars"
-    target = roms_base / "gba" / "Recovering.gba"
-    target.parent.mkdir(parents=True)
-    target.write_bytes(b"x")
-    rom = make_rom(
-        rom_id=1,
-        outputs=(TransformedOutput(path="gba/Recovering.gba", md5="abc", size=1),),
-        primary_output_index=0,
-    )
-    write_sidecar(target, rom, roms_base=roms_base, sidecars_root=sidecars_root)
-
-    # Empty state — sidecar exists but state is unaware.
-    orphans = find_orphans(roms_base=roms_base, sidecars_root=sidecars_root, state=LibraryState())
-    assert orphans == []
-
-
-def test_find_orphans_skips_dotfiles_and_sidecar_suffixes(tmp_path: Path) -> None:
-    roms_base = tmp_path / "ROMs"
-    sidecars_root = tmp_path / "state" / "sidecars"
     gba = roms_base / "gba"
     gba.mkdir(parents=True)
     (gba / ".directory").write_text("[Desktop Entry]")  # KDE droppings
-    (gba / f"{SIDECAR_PREFIX}Foo.gba{SIDECAR_SUFFIX}").write_text("{}")  # legacy sidecar
-    (gba / f"Foo.gba{SIDECAR_SUFFIX}").write_text("{}")  # very-legacy plain sidecar
     (gba / "Loose.gba").write_bytes(b"x")  # the only real orphan
 
-    orphans = find_orphans(roms_base=roms_base, sidecars_root=sidecars_root, state=LibraryState())
+    orphans = find_orphans(roms_base=roms_base, state=LibraryState())
     assert len(orphans) == 1
     assert orphans[0].abs_path.name == "Loose.gba"
 
@@ -150,20 +109,18 @@ def test_find_orphans_skips_top_level_files_in_roms_base(tmp_path: Path) -> None
     """A file directly in roms_base (no platform subdir) is too ambiguous to
     classify; reconcile only walks platform-shaped subdirs."""
     roms_base = tmp_path / "ROMs"
-    sidecars_root = tmp_path / "state" / "sidecars"
     roms_base.mkdir()
     (roms_base / "stray.bin").write_bytes(b"x")  # top-level — skipped
 
     (roms_base / "gba").mkdir()
     (roms_base / "gba" / "in-platform.gba").write_bytes(b"y")  # included
 
-    orphans = find_orphans(roms_base=roms_base, sidecars_root=sidecars_root, state=LibraryState())
+    orphans = find_orphans(roms_base=roms_base, state=LibraryState())
     assert [o.abs_path.name for o in orphans] == ["in-platform.gba"]
 
 
 def test_find_orphans_respects_platform_filter(tmp_path: Path) -> None:
     roms_base = tmp_path / "ROMs"
-    sidecars_root = tmp_path / "state" / "sidecars"
     (roms_base / "gba").mkdir(parents=True)
     (roms_base / "snes").mkdir(parents=True)
     (roms_base / "gba" / "A.gba").write_bytes(b"x")
@@ -171,7 +128,6 @@ def test_find_orphans_respects_platform_filter(tmp_path: Path) -> None:
 
     orphans = find_orphans(
         roms_base=roms_base,
-        sidecars_root=sidecars_root,
         state=LibraryState(),
         platform_filter="gba",
     )
@@ -182,13 +138,12 @@ def test_find_orphans_walks_nested_subdirs(tmp_path: Path) -> None:
     """Multi-disc ROMs land in nested subdirs (e.g., `psx/Game/CD1.cue`).
     Walker must recurse."""
     roms_base = tmp_path / "ROMs"
-    sidecars_root = tmp_path / "state" / "sidecars"
     deep = roms_base / "psx" / "Game"
     deep.mkdir(parents=True)
     (deep / "CD1.cue").write_bytes(b"x")
     (deep / "CD1.bin").write_bytes(b"y")
 
-    orphans = find_orphans(roms_base=roms_base, sidecars_root=sidecars_root, state=LibraryState())
+    orphans = find_orphans(roms_base=roms_base, state=LibraryState())
     assert {o.rel_path.name for o in orphans} == {"CD1.cue", "CD1.bin"}
 
 

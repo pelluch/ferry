@@ -28,16 +28,9 @@ from ferry.adapters.romm import (
     RommForbiddenError,
     RommHttpAdapter,
 )
-from ferry.adapters.sidecar import (
-    default_sidecars_root,
-    migrate_legacy_sidecars,
-    read_sidecar,
-)
 from ferry.adapters.state_store import (
     default_state_path,
-    ensure_sidecars,
     load_state,
-    recover_state_from_sidecars,
     save_state,
 )
 from ferry.config import ConfigError, SavesConfig, SyncConfig, load_config
@@ -106,8 +99,9 @@ _DEFAULT_PREVIEW = 20
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help=(
-        "Sync save data only for the ROM at this path (resolves rom_id from "
-        "the ROM's sidecar). Implies --saves-only. Used by launch-wrapper hooks."
+        "Sync save data only for the ROM at this path (resolves rom_id by "
+        "matching against state.json outputs). Implies --saves-only. Used by "
+        "launch-wrapper hooks."
     ),
 )
 @click.pass_context
@@ -190,22 +184,6 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
 
             state_path = default_state_path()
             state = load_state(state_path)
-            if config.destination is not None:
-                migrated = migrate_legacy_sidecars(roms_base=config.destination.roms_base)
-                if migrated:
-                    click.echo(
-                        f"migrated {migrated} legacy sidecar(s) to {default_sidecars_root()}"
-                    )
-            if not state.roms and config.destination is not None:
-                recovered = recover_state_from_sidecars(config.destination.roms_base)
-                if recovered.roms:
-                    click.echo(f"recovered {len(recovered.roms)} ROM(s) from on-disk sidecars")
-                    state = recovered
-                    save_state(state, state_path)
-            if config.destination is not None:
-                regenerated = ensure_sidecars(state, config.destination)
-                if regenerated:
-                    click.echo(f"regenerated {regenerated} missing sidecar(s) from state")
             trash_root = default_trash_root()
             plan = compute_plan(
                 current_roms=current_roms,
@@ -306,8 +284,8 @@ def _run_saves_only(
         rom = _find_rom_by_path(state, rom_path, roms_base=roms_base)
         if rom is None:
             raise click.ClickException(
-                f"ROM at {rom_path} isn't tracked by ferry — no sidecar found at "
-                f"that path. Run `ferry sync` to register the library first."
+                f"ROM at {rom_path} isn't tracked by ferry — no matching entry "
+                f"in state.json. Run `ferry sync` to register the library first."
             )
 
     click.echo(f"connecting to {config.romm.url}…")
@@ -366,18 +344,31 @@ def _warn_on_launch_hook_upstream_drift() -> None:
 def _find_rom_by_path(
     state: LibraryState, rom_path: Path, *, roms_base: Path | None
 ) -> RomState | None:
-    """Resolve a ROM file path to its RomState via sidecar lookup.
+    """Resolve a ROM file path to its RomState by scanning state outputs.
 
-    Returns None when no sidecar exists at the path or the rom_id from
-    the sidecar isn't in state. The caller surfaces a friendly error.
+    Returns None when no rom in state has *rom_path* among its
+    `outputs[]`. The caller surfaces a friendly error.
 
-    `roms_base=None` is tolerated so the launch hook flow can still find
-    legacy next-to-rom sidecars when no destination is configured.
+    Compares as a relative path under `roms_base` when one is given
+    (state stores outputs as roms_base-relative strings). When
+    `roms_base` is None (e.g. launch-hook with no destination
+    configured), falls back to absolute-path string match against the
+    output's stored value.
     """
-    sidecar_rom = read_sidecar(rom_path, roms_base=roms_base)
-    if sidecar_rom is None:
-        return None
-    return state.roms.get(sidecar_rom.rom_id)
+    rel_match: str | None = None
+    if roms_base is not None:
+        try:
+            rel_match = str(rom_path.resolve().relative_to(roms_base.resolve()))
+        except ValueError:
+            rel_match = None
+    abs_match = str(rom_path.resolve()) if rom_path.is_absolute() else None
+    for rom in state.roms.values():
+        for output in rom.outputs:
+            if rel_match is not None and output.path == rel_match:
+                return rom
+            if abs_match is not None and output.path == abs_match:
+                return rom
+    return None
 
 
 def _print_save_sync_preview(

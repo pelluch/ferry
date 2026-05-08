@@ -319,7 +319,7 @@ def test_full_flag_shows_every_entry(tmp_path: Path) -> None:
 
 @respx.mock
 def test_sync_executes_and_lands_files(tmp_path: Path, monkeypatch) -> None:
-    """Full stack: collections → roms → download → unzip → state + sidecar."""
+    """Full stack: collections → roms → download → unzip → state."""
     monkeypatch.setenv("HOME", str(tmp_path))  # state.json + scratch under tmp
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
@@ -449,7 +449,6 @@ def test_sync_executes_deletes_and_moves_to_trash(tmp_path: Path, monkeypatch) -
         "delete_on_remove = true\n"
     )
 
-    from ferry.adapters.sidecar import sidecar_path_for, write_sidecar
     from ferry.adapters.state_store import default_state_path, save_state
     from ferry.domain.state import LibraryState, RomState, TransformedOutput
 
@@ -471,7 +470,6 @@ def test_sync_executes_deletes_and_moves_to_trash(tmp_path: Path, monkeypatch) -
     leftover_file = roms_base / "gc" / "Leftover.iso"
     leftover_file.parent.mkdir(parents=True)
     leftover_file.write_bytes(b"still-here")
-    write_sidecar(leftover_file, leftover_rom, roms_base=roms_base)
 
     mock_endpoints(
         collections=[{"id": 6, "name": "Steam Deck"}],
@@ -483,9 +481,8 @@ def test_sync_executes_deletes_and_moves_to_trash(tmp_path: Path, monkeypatch) -
     assert result.exit_code == 0, result.output
     assert "Deleted: 1" in result.output
     assert "Trashed ROMs" in result.output
-    # File and sidecar moved out of roms_base.
+    # File moved out of roms_base.
     assert not leftover_file.exists()
-    assert not sidecar_path_for(leftover_file, roms_base=roms_base).exists()
     # Trash dir holds the same layout.
     trash_root = tmp_path / ".local" / "state" / "ferry" / "trash"
     trash_entries = list(trash_root.iterdir())
@@ -541,62 +538,6 @@ def test_sync_with_delete_on_remove_false_keeps_files(tmp_path: Path, monkeypatc
     assert "Nothing to execute" in result.output
     assert "delete_on_remove = true" in result.output
     assert f.exists()  # still here
-
-
-@respx.mock
-def test_sync_recovers_state_from_sidecars_when_state_json_missing(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """User deleted state.json but kept ROM files + sidecars → recovery on next sync."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    roms_base = tmp_path / "ROMs"
-    cfg = write_config(tmp_path / "config.toml", roms_base=roms_base)
-
-    # Simulate a previous sync: ROM file exists with a sidecar; no state.json.
-    from ferry.adapters.sidecar import write_sidecar
-    from ferry.domain.state import RomState, TransformedOutput
-
-    primary = roms_base / "gc" / "Pikmin.iso"
-    primary.parent.mkdir(parents=True)
-    primary.write_bytes(b"pretend-iso")
-    rom_state = RomState(
-        rom_id=101,
-        platform_slug="gc",
-        name="Pikmin",
-        source_filename="Pikmin.zip",
-        source_md5="abc",
-        source_size=100,
-        source_updated_at="2026-04-25T12:00:00Z",
-        transforms=("unzip",),
-        outputs=(TransformedOutput(path="gc/Pikmin.iso", md5="def", size=11),),
-        primary_output_index=0,
-        synced_at="2026-04-25T12:01:00Z",
-    )
-    write_sidecar(primary, rom_state, roms_base=roms_base)
-
-    # RomM still has the same rom with the same updated_at → no work.
-    mock_endpoints(
-        collections=[{"id": 6, "name": "Steam Deck"}],
-        rom_items=[
-            {
-                "id": 101,
-                "name": "Pikmin",
-                "platform_slug": "gc",
-                "fs_name": "Pikmin.zip",
-                "updated_at": "2026-04-25T12:00:00Z",
-            }
-        ],
-    )
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["--config", str(cfg), "sync"], env={})
-    assert result.exit_code == 0, result.output
-    assert "recovered 1 ROM(s) from on-disk sidecars" in result.output
-    assert "Nothing to do" in result.output
-    # State.json now exists (saved after recovery).
-    state_path = tmp_path / ".local" / "state" / "ferry" / "state.json"
-    assert state_path.exists()
 
 
 @respx.mock
@@ -905,66 +846,6 @@ def _write_minimal_snapshot(tmp_path: Path, *, bundled_sha: str, block_sha: str 
         )
     )
     return bundled
-
-
-@respx.mock
-def test_sync_migrates_legacy_sidecars_with_echo(tmp_path: Path, monkeypatch) -> None:
-    """Legacy v2 next-to-rom sidecars get migrated on first sync, with echo."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    roms_base = tmp_path / "ROMs"
-    cfg = write_config(tmp_path / "config.toml", roms_base=roms_base)
-
-    # Plant a legacy sidecar next to a ROM, no state.json.
-    from ferry.adapters.sidecar import (
-        default_sidecars_root,
-        legacy_sidecar_paths_for,
-        sidecar_path_for,
-    )
-    from ferry.domain.state import RomState, TransformedOutput, rom_to_json
-
-    primary = roms_base / "gc" / "Pikmin.iso"
-    primary.parent.mkdir(parents=True)
-    primary.write_bytes(b"pretend-iso")
-    rom_state = RomState(
-        rom_id=101,
-        platform_slug="gc",
-        name="Pikmin",
-        source_filename="Pikmin.zip",
-        source_md5="abc",
-        source_size=100,
-        source_updated_at="2026-04-25T12:00:00Z",
-        transforms=("unzip",),
-        outputs=(TransformedOutput(path="gc/Pikmin.iso", md5="def", size=11),),
-        primary_output_index=0,
-        synced_at="2026-04-25T12:01:00Z",
-    )
-    dot, _plain = legacy_sidecar_paths_for(primary)
-    dot.write_text(rom_to_json(rom_state))
-
-    mock_endpoints(
-        collections=[{"id": 6, "name": "Steam Deck"}],
-        rom_items=[
-            {
-                "id": 101,
-                "name": "Pikmin",
-                "platform_slug": "gc",
-                "fs_name": "Pikmin.zip",
-                "updated_at": "2026-04-25T12:00:00Z",
-            }
-        ],
-    )
-
-    runner = CliRunner()
-    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
-    assert result.exit_code == 0, result.output
-    assert "migrated 1 legacy sidecar" in result.output
-
-    # After migration: legacy gone, canonical present.
-    assert not dot.exists()
-    canonical = sidecar_path_for(primary, roms_base=roms_base)
-    assert canonical.exists()
-    # Canonical lives under XDG_STATE_HOME / ferry / sidecars (default).
-    assert canonical.is_relative_to(default_sidecars_root())
 
 
 def test_sync_warns_when_bundled_has_drifted(tmp_path: Path, monkeypatch) -> None:

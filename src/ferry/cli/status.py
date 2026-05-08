@@ -31,7 +31,6 @@ from ferry.adapters.retroarch_paths import (
     select_active_install,
 )
 from ferry.adapters.retroarch_saves import list_local_saves as list_ra_local_saves
-from ferry.adapters.sidecar import sidecar_path_for
 from ferry.adapters.state_store import default_state_path, load_state
 from ferry.config import ConfigError, load_config
 from ferry.config.schema import Config
@@ -437,45 +436,29 @@ def _print_reconcile(state: LibraryState, config: Config) -> None:
     click.echo("")
     click.echo("ROMs by platform:")
     total_missing_primary = 0
-    total_missing_sidecar = 0
     for platform_slug in sorted(by_platform):
         roms = by_platform[platform_slug]
         missing_primary = 0
-        missing_sidecar = 0
         for rom in roms:
             primary_abs = roms_base / rom.primary_output.path
             if not primary_abs.exists():
                 missing_primary += 1
-            elif not sidecar_path_for(primary_abs, roms_base=roms_base).exists():
-                missing_sidecar += 1
         total_missing_primary += missing_primary
-        total_missing_sidecar += missing_sidecar
         resolved_dir = resolve_platform_dir(platform_slug)
-        marker = "✓" if (missing_primary == 0 and missing_sidecar == 0) else "✗"
-        flags = []
-        if missing_primary:
-            flags.append(f"{missing_primary} missing on disk")
-        if missing_sidecar:
-            flags.append(f"{missing_sidecar} missing sidecars")
-        suffix = f"  ({', '.join(flags)})" if flags else ""
+        marker = "✓" if missing_primary == 0 else "✗"
+        suffix = f"  ({missing_primary} missing on disk)" if missing_primary else ""
         slug_display = (
             platform_slug if platform_slug == resolved_dir else f"{platform_slug} → {resolved_dir}/"
         )
         click.echo(f"  {marker} {slug_display:<24} {len(roms):>5}{suffix}")
 
-    if total_missing_primary or total_missing_sidecar:
+    if total_missing_primary:
         click.echo("")
         click.echo("Issues:")
-        if total_missing_primary:
-            click.echo(
-                f"  - {total_missing_primary} ROM(s) have missing primary outputs "
-                "(next `ferry sync` will re-download)"
-            )
-        if total_missing_sidecar:
-            click.echo(
-                f"  - {total_missing_sidecar} ROM(s) have missing sidecars "
-                "(next `ferry sync` will regenerate from state)"
-            )
+        click.echo(
+            f"  - {total_missing_primary} ROM(s) have missing primary outputs "
+            "(next `ferry sync` will re-download)"
+        )
 
 
 def _print_trash_summary(trash_root: Path) -> None:

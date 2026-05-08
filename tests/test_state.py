@@ -231,11 +231,11 @@ def test_transforms_wrong_shape_raises(make_rom) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sidecar (single-RomState) roundtrips
+# Single-RomState roundtrips
 # ---------------------------------------------------------------------------
 
 
-def test_rom_roundtrips_for_sidecar_use(make_rom) -> None:
+def test_rom_roundtrips_via_per_rom_helpers(make_rom) -> None:
     rom = make_rom()
     decoded = rom_from_json(rom_to_json(rom))
     assert decoded == rom

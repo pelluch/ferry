@@ -1,8 +1,8 @@
 """`ferry reconcile` — adopt orphan ROM files into ferry's tracked state.
 
 Walks the configured `roms_base` for files that aren't tracked
-(no canonical sidecar, not in state.json), classifies each against
-RomM's per-platform listing using name + md5, and writes sidecars +
+(not in state.json), classifies each against RomM's per-platform
+listing using name + md5, and writes
 state.json entries for **confident** matches (name AND hash both
 match a single rom). Other classifications (name-only, hash-only,
 ambiguous, no-match) are reported but not adopted by default —
@@ -30,16 +30,9 @@ from typing import Any
 import click
 
 from ferry.adapters.romm import RommApi, RommApiError, RommAuthError, RommHttpAdapter
-from ferry.adapters.sidecar import (
-    default_sidecars_root,
-    migrate_legacy_sidecars,
-    write_sidecar,
-)
 from ferry.adapters.state_store import (
     default_state_path,
-    ensure_sidecars,
     load_state,
-    recover_state_from_sidecars,
     save_state,
 )
 from ferry.config import ConfigError, load_config
@@ -69,7 +62,7 @@ logger = logging.getLogger(__name__)
 @click.option(
     "--dry-run",
     is_flag=True,
-    help="Show what would be adopted without modifying state or sidecars.",
+    help="Show what would be adopted without modifying state.",
 )
 @click.option(
     "--platform",
@@ -95,7 +88,7 @@ def reconcile(
     platform_slug: str | None,
     include_name_only: bool,
 ) -> None:
-    """Adopt orphan ROM files: name+hash-match them against RomM, write sidecars."""
+    """Adopt orphan ROM files: name+hash-match them against RomM, add to state."""
     try:
         loaded = load_config(ctx.obj.get("config_path"))
     except ConfigError as e:
@@ -130,26 +123,8 @@ def _run_reconcile(
 ) -> None:
     assert config.destination is not None
     roms_base = config.destination.roms_base
-    sidecars_root = default_sidecars_root()
     state_path = default_state_path()
     state = load_state(state_path)
-
-    # Mirror sync's preamble — make sure state-vs-sidecar is converged before
-    # we walk for orphans, otherwise the same file could classify as orphan in
-    # one run and tracked in the next.
-    migrated = migrate_legacy_sidecars(roms_base=roms_base)
-    if migrated:
-        click.echo(f"migrated {migrated} legacy sidecar(s) to {sidecars_root}")
-    if not state.roms:
-        recovered = recover_state_from_sidecars(roms_base)
-        if recovered.roms:
-            click.echo(f"recovered {len(recovered.roms)} ROM(s) from on-disk sidecars")
-            state = recovered
-            if not dry_run:
-                save_state(state, state_path)
-    regenerated = ensure_sidecars(state, config.destination)
-    if regenerated:
-        click.echo(f"regenerated {regenerated} missing sidecar(s) from state")
 
     # Resolve --platform <slug> to its on-disk dir name (the walker
     # filter is dir-based, not slug-based, since dir is what we
@@ -160,7 +135,6 @@ def _run_reconcile(
 
     orphans = find_orphans(
         roms_base=roms_base,
-        sidecars_root=sidecars_root,
         state=state,
         platform_filter=platform_dir_filter,
     )
@@ -211,7 +185,7 @@ def _run_reconcile(
 
     if dry_run:
         click.echo("")
-        click.echo("(dry run — no sidecars or state written)")
+        click.echo("(dry run — no state written)")
         return
 
     will_adopt_name_only = include_name_only and name_only_singular
@@ -310,14 +284,13 @@ def _adopt_confident(
     state: LibraryState,
     state_path: Path,
 ) -> int:
-    """Write sidecar + state.json entry for each confident match."""
+    """Add a state.json entry for each confident match."""
     assert config.destination is not None
     roms_base = config.destination.roms_base
     adopted = 0
     for c in confident:
         transforms = config.transforms.for_platform(c.match.rom_data.get("platform_slug") or "")
         rom_state = synthesize_state(c, roms_base=roms_base, transforms_for_platform=transforms)
-        write_sidecar(c.orphan.abs_path, rom_state, roms_base=roms_base)
         state.roms[rom_state.rom_id] = rom_state
         adopted += 1
     if adopted:
@@ -332,7 +305,7 @@ def _adopt_name_only(
     state: LibraryState,
     state_path: Path,
 ) -> int:
-    """Write sidecar + state.json entry for each single-rom_id NameOnly match.
+    """Add a state.json entry for each single-rom_id NameOnly match.
 
     Synthesis stores `output.md5` from the local file's bytes (which by
     definition don't match the server's md5 for this category) and
@@ -343,14 +316,12 @@ def _adopt_name_only(
     right rom" until a real update arrives.
     """
     assert config.destination is not None
-    roms_base = config.destination.roms_base
     adopted = 0
     for n in name_only_singular:
         # _name_only_rom_id confirmed single rom_id; pick the first match.
         match = n.candidates[0]
         transforms = config.transforms.for_platform(match.rom_data.get("platform_slug") or "")
         rom_state = synthesize_state_from_match(n.orphan, match, transforms_for_platform=transforms)
-        write_sidecar(n.orphan.abs_path, rom_state, roms_base=roms_base)
         state.roms[rom_state.rom_id] = rom_state
         adopted += 1
     if adopted:

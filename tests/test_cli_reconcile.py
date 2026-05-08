@@ -9,7 +9,6 @@ import httpx
 import respx
 from click.testing import CliRunner
 
-from ferry.adapters.sidecar import sidecar_path_for
 from ferry.adapters.state_store import default_state_path, load_state
 from ferry.cli import app
 
@@ -117,8 +116,7 @@ def test_reconcile_no_orphans_says_so(tmp_path: Path, monkeypatch) -> None:
 
 @respx.mock
 def test_reconcile_adopts_confident_pass_through_orphan(tmp_path: Path, monkeypatch) -> None:
-    """Cartridge `.gba` matches RomM by name+hash → adopted: sidecar +
-    state.json updated."""
+    """Cartridge `.gba` matches RomM by name+hash → adopted: state.json updated."""
     monkeypatch.setenv("HOME", str(tmp_path))
     roms_base = tmp_path / "ROMs"
     target = roms_base / "gba" / "Pikmin.gba"
@@ -149,9 +147,6 @@ def test_reconcile_adopts_confident_pass_through_orphan(tmp_path: Path, monkeypa
     assert "Confident:       1" in result.output
     assert "Adopted 1 ROM(s)" in result.output
 
-    # Sidecar at canonical location.
-    canonical = sidecar_path_for(target, roms_base=roms_base)
-    assert canonical.exists()
     # State.json has the new entry.
     state = load_state(default_state_path())
     assert 101 in state.roms
@@ -188,10 +183,8 @@ def test_reconcile_dry_run_writes_nothing(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(app, ["--config", str(cfg), "reconcile", "--dry-run"], env={})
     assert result.exit_code == 0, result.output
     assert "Confident:       1" in result.output
-    assert "(dry run — no sidecars or state written)" in result.output
+    assert "(dry run — no state written)" in result.output
 
-    # No sidecar written.
-    assert not sidecar_path_for(target, roms_base=roms_base).exists()
     # No state changes.
     state = load_state(default_state_path())
     assert 101 not in state.roms
@@ -233,8 +226,9 @@ def test_reconcile_lists_name_only_without_adopting(tmp_path: Path, monkeypatch)
     assert "Name-only:       1" in result.output
     assert "Confident:       0" in result.output
     assert "Adopted" not in result.output
-    # Nothing written.
-    assert not sidecar_path_for(target, roms_base=roms_base).exists()
+    # Nothing written to state.
+    state = load_state(default_state_path())
+    assert 101 not in state.roms
 
 
 @respx.mock
@@ -344,7 +338,10 @@ def test_reconcile_adopts_multi_file_zip_via_largest_inner_hash(
     assert result.exit_code == 0, result.output
     assert "Confident:       1" in result.output
     assert "Adopted 1 ROM(s)" in result.output
-    assert sidecar_path_for(target, roms_base=roms_base).exists()
+    state = load_state(default_state_path())
+    assert any(
+        ts.path.endswith("USNavyFighters.zip") for r in state.roms.values() for ts in r.outputs
+    )
 
 
 @respx.mock
@@ -430,8 +427,6 @@ def test_reconcile_include_name_only_adopts_single_rom_id_match(
     assert "Adopted 0 confident + 1 name-only" in result.output
     state = load_state(default_state_path())
     assert 700 in state.roms
-    canonical = sidecar_path_for(target, roms_base=roms_base)
-    assert canonical.exists()
 
 
 @respx.mock

@@ -26,12 +26,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ferry.adapters.romm import RommApi, RommApiError
-from ferry.adapters.sidecar import (
-    SIDECAR_PREFIX,
-    SIDECAR_SUFFIX,
-    sidecar_path_for,
-    write_sidecar,
-)
 from ferry.adapters.state_store import save_state
 from ferry.config import TransformsConfig
 from ferry.config.schema import Config
@@ -240,31 +234,15 @@ def _execute_delete(
     destination: Destination,
     trash_root: Path,
 ) -> Path:
-    """Move all of *action.previous*'s outputs + sidecar to the trash dir."""
+    """Move all of *action.previous*'s outputs to the trash dir."""
     rom = action.previous
-    primary_abs = destination.roms_base / rom.primary_output.path
     paths: list[Path | tuple[Path, Path]] = [destination.roms_base / o.path for o in rom.outputs]
-    sidecar = sidecar_path_for(primary_abs, roms_base=destination.roms_base)
-    if sidecar.exists():
-        paths.append((sidecar, _trash_rel_for_sidecar(rom.primary_output.path)))
     return trash_paths(
         paths,
         rom.rom_id,
         trash_root=trash_root,
         roms_base=destination.roms_base,
     )
-
-
-def _trash_rel_for_sidecar(primary_rel: str) -> Path:
-    """Trash-dir-relative path for a sidecar.
-
-    Mirrors the v2 dot-prefixed legacy layout (next-to-rom). On manual
-    restore (`mv <trash>/* ~/ROMs/`), the sidecar lands at the legacy
-    fallback path and `read_sidecar`'s legacy-fallback handles it.
-    Re-syncing then re-promotes it to the canonical location.
-    """
-    primary = Path(primary_rel)
-    return primary.parent / (SIDECAR_PREFIX + primary.name + SIDECAR_SUFFIX)
 
 
 def _execute_one(
@@ -349,11 +327,6 @@ def _execute_one(
             primary_output_index=primary_index,
             synced_at=_now_iso(),
         )
-        write_sidecar(
-            pipeline_outputs[primary_index],
-            new_state,
-            roms_base=destination.roms_base,
-        )
         succeeded = True
         return new_state
     finally:
@@ -372,15 +345,10 @@ def _cleanup_orphans(
     """Trash files from the previous state that aren't in the new output set.
 
     Uses the same trash dir as DeleteAction so a single timestamped entry
-    holds everything from one update event. Stale sidecar always trashed
-    too — we'll write a fresh one at the new primary.
+    holds everything from one update event.
     """
     new_set = set(new_outputs)
     to_trash: list[Path | tuple[Path, Path]] = []
-    old_primary = roms_base / previous.outputs[previous.primary_output_index].path
-    old_sidecar = sidecar_path_for(old_primary, roms_base=roms_base)
-    if old_sidecar.exists():
-        to_trash.append((old_sidecar, _trash_rel_for_sidecar(previous.primary_output.path)))
     for old in previous.outputs:
         old_abs = roms_base / old.path
         if old_abs not in new_set and old_abs.exists():
