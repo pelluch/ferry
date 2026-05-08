@@ -28,6 +28,7 @@ No HTTP, no sidecar I/O, no state.json writes — those live in
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,7 +39,10 @@ from ferry.adapters.sidecar import (
     SIDECAR_SUFFIX,
     sidecar_path_for,
 )
+from ferry.domain.rom_files import resolve_local_filename
 from ferry.domain.state import LibraryState, RomState, TransformedOutput
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,7 +361,7 @@ def synthesize_state_from_match(
         rom_id=match.rom_id,
         platform_slug=str(rom_data.get("platform_slug") or "?"),
         name=str(rom_data.get("name") or rom_data.get("fs_name") or "?"),
-        source_filename=str(rom_data.get("fs_name") or ""),
+        source_filename=resolve_local_filename(rom_data, logger=logger),
         source_md5=str(file_data.get("md5_hash") or ""),
         source_size=_safe_int(rom_data.get("fs_size_bytes")) or 0,
         source_updated_at=str(rom_data.get("updated_at") or ""),

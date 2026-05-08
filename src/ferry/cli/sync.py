@@ -43,6 +43,7 @@ from ferry.adapters.state_store import (
 from ferry.config import ConfigError, SavesConfig, SyncConfig, load_config
 from ferry.config.schema import Config
 from ferry.domain.platforms import resolve_platform_dir
+from ferry.domain.rom_files import resolve_local_filename
 from ferry.domain.save_plan import PlannedSaveAction, SavePlan
 from ferry.domain.state import LibraryState, RomState
 from ferry.domain.sync_plan import (
@@ -978,11 +979,11 @@ def _format_action_destination(
         return str(roms_base / primary.path)
 
     # Add / Update: source filename → resolved platform dir
-    fs_name = action.rom_data.get("fs_name") or f"rom-{action.rom_id}"
+    local_filename = resolve_local_filename(action.rom_data, logger=logger)
     platform_dir = roms_base / resolve_platform_dir(action.platform_slug)
     pipeline = config.transforms.for_platform(action.platform_slug)
     pipeline_str = f" [{' → '.join(pipeline)}]" if pipeline else ""
-    return f"{platform_dir / fs_name}{pipeline_str}"
+    return f"{platform_dir / local_filename}{pipeline_str}"
 
 
 def _print_execution_summary(plan: SyncPlan, result: ExecutionResult) -> None:

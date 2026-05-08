@@ -37,6 +37,7 @@ from ferry.config import TransformsConfig
 from ferry.config.schema import Config
 from ferry.domain.destination import Destination
 from ferry.domain.platforms import resolve_platform_dir
+from ferry.domain.rom_files import resolve_local_filename
 from ferry.domain.state import LibraryState, RomState, TransformedOutput
 from ferry.domain.sync_plan import AddAction, DeleteAction, SyncPlan, UpdateAction
 from ferry.services.pipeline import run_pipeline
@@ -278,7 +279,13 @@ def _execute_one(
     rom_data = action.rom_data
     rom_id = action.rom_id
     platform = action.platform_slug
+    # `fs_name` is RomM's on-server name — for nested-single-file ROMs it's the
+    # parent folder, not the file. Use it for the URL (RomM identifies the rom
+    # by `rom_id`; the URL filename is just for content-disposition) but
+    # resolve a separate `local_filename` (with extension) for the on-disk
+    # scratch path and the `source_filename` we record in state.
     fs_name = rom_data.get("fs_name") or f"rom-{rom_id}"
+    local_filename = resolve_local_filename(rom_data, logger=logger)
 
     rom_scratch = scratch_root / str(rom_id)
     if rom_scratch.exists():
@@ -288,7 +295,7 @@ def _execute_one(
 
     succeeded = False
     try:
-        source_path = rom_scratch / fs_name
+        source_path = rom_scratch / local_filename
         download_result = api.download_rom(rom_id, fs_name, source_path)
         # Note: we don't cross-check `download_result.md5` against
         # rom_data.get("md5_hash") even when RomM provides one. RomM
@@ -333,7 +340,7 @@ def _execute_one(
             rom_id=rom_id,
             platform_slug=platform,
             name=action.name,
-            source_filename=fs_name,
+            source_filename=local_filename,
             source_md5=download_result.md5,
             source_size=download_result.size,
             source_updated_at=str(rom_data.get("updated_at", "")),

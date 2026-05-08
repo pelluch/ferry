@@ -191,6 +191,74 @@ def test_add_action_with_no_transforms_passes_source_through(tmp_path: Path) -> 
     assert landed.read_bytes() == payload
 
 
+@respx.mock
+def test_add_action_nested_single_file_uses_files_entry_for_local_name(
+    tmp_path: Path,
+) -> None:
+    """Nested-single-file ROMs land with the real filename, not the folder name.
+
+    When RomM stores a single file inside a per-game folder
+    (`roms/psx/Resident Evil/Resident Evil.chd`), the API returns
+    `fs_name="Resident Evil"` (folder, no extension) with
+    `has_nested_single_file=True`; the actual filename lives in
+    `files[0].file_name`. ferry must keep `fs_name` for the URL/Content-
+    Disposition (RomM identifies the rom by `rom_id`) but use
+    `files[0].file_name` for the local path — otherwise launchers can't
+    open the extension-less file.
+    """
+    payload = b"chd-bytes"
+    rom = {
+        "id": 707,
+        "name": "Resident Evil",
+        "platform_slug": "psx",
+        "fs_name": "Resident Evil",  # folder, no extension
+        "updated_at": "2026-04-25T12:00:00Z",
+        "has_nested_single_file": True,
+        "files": [{"file_name": "Resident Evil.chd"}],
+    }
+    # URL still uses the folder-shaped fs_name; RomM identifies by rom_id.
+    mock_download(707, "Resident Evil", payload)
+
+    config = make_config(tmp_path, transforms={})
+    state = LibraryState()
+    state_path = tmp_path / "state.json"
+    plan = SyncPlan(
+        to_add=[
+            AddAction(
+                rom_id=707,
+                name="Resident Evil",
+                platform_slug="psx",
+                rom_data=rom,
+                reason="new",
+            )
+        ],
+        to_update=[],
+        to_delete=[],
+        unchanged_count=0,
+    )
+
+    with RommHttpAdapter(config.romm) as http:
+        api = RommApi(http)
+        result = execute_plan(
+            plan=plan,
+            config=config,
+            api=api,
+            state=state,
+            state_path=state_path,
+            scratch_root=tmp_path / "scratch",
+            trash_root=tmp_path / "trash",
+        )
+
+    assert len(result.succeeded) == 1
+    landed = tmp_path / "ROMs" / "psx" / "Resident Evil.chd"
+    assert landed.read_bytes() == payload
+    # Extensionless folder-name file must NOT exist.
+    assert not (tmp_path / "ROMs" / "psx" / "Resident Evil").exists()
+    # State records the real filename, not the folder name.
+    persisted = load_state(state_path)
+    assert persisted.roms[707].source_filename == "Resident Evil.chd"
+
+
 # ---------------------------------------------------------------------------
 # Multi-output zip → primary picker
 # ---------------------------------------------------------------------------
