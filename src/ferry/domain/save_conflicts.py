@@ -130,7 +130,6 @@ def classify(
                 server_updated_at=server_ts,
                 local_path_exists=local_path_exists,
                 local_path_mtime=local_path_mtime,
-                local_save_filename=local_save_filename,
             )
         if has_prior:
             # No path probe — fall back to prior-based reasoning: skip
@@ -166,7 +165,7 @@ def classify(
             return Classification(
                 action="ambiguous",
                 reason="first sync — within tolerance",
-                ambiguous_message=f"{local_save_filename}: first sync — within tolerance",
+                ambiguous_message="first sync — within tolerance",
             )
         if local_md5 == s_md5:
             return Classification(action="skip", reason="bytes identical")
@@ -204,7 +203,7 @@ def classify(
         return Classification(
             action="ambiguous",
             reason="conflict within tolerance",
-            ambiguous_message=f"{local_save_filename}: conflict within tolerance",
+            ambiguous_message="conflict within tolerance",
         )
     return Classification(
         action="upload" if resolution == "upload" else "download",
@@ -223,7 +222,6 @@ def _classify_server_only_with_path(
     server_updated_at: str,
     local_path_exists: bool,
     local_path_mtime: float | None,
-    local_save_filename: str | None,
 ) -> Classification:
     """Newer-wins for a server save with no local-key match, given the
     file-at-resolved-path probe.
@@ -249,11 +247,10 @@ def _classify_server_only_with_path(
         )
     resolution = resolve_newest(local_mtime=local_path_mtime, server_updated_at=server_updated_at)
     if resolution == "ambiguous":
-        label = local_save_filename or "<server-only>"
         return Classification(
             action="ambiguous",
             reason="server-only key within tolerance of local path",
-            ambiguous_message=f"{label}: server-only within tolerance of local path",
+            ambiguous_message="server-only within tolerance of local path",
         )
     if resolution == "upload":
         return Classification(

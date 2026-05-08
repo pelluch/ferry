@@ -442,7 +442,14 @@ def test_sync_first_time_conflict_within_tolerance_is_ambiguous(tmp_path: Path) 
     assert result.uploaded == 0
     assert result.downloaded == 0
     assert len(result.ambiguous) == 1
-    assert "rom_id=1" in result.ambiguous[0]
+    line = result.ambiguous[0]
+    # New ambiguous-line shape: rom name, filename, key context, then reason.
+    assert rom.name in line
+    assert "Mario.srm" in line
+    assert "rom_id=1" in line
+    assert "emulator=retroarch-snes9x" in line
+    assert "slot=default" in line
+    assert "first sync — within tolerance" in line
 
 
 @respx.mock

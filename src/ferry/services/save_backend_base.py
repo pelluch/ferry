@@ -624,7 +624,7 @@ class SaveBackendBase(ABC):
             local = local_by_key.get(key)
             server = server_by_key.get(key)
             prev = prev_by_key.get(key)
-            path_exists, path_mtime = self._probe_local_path_for_server_only(
+            path_exists, path_mtime, candidate = self._probe_local_path_for_server_only(
                 rom, emulator, slot, local, server, prev
             )
             decision = classify_for(
@@ -637,7 +637,12 @@ class SaveBackendBase(ABC):
             if decision.conflict_resolved:
                 conflict_count += 1
             if decision.ambiguous_message is not None:
-                ambiguous.append(f"rom_id={rom_id} ({decision.ambiguous_message})")
+                filename = local.save_filename if local else (candidate or "?")
+                ambiguous.append(
+                    f"{rom.name} — {filename} (rom_id={rom_id}, "
+                    f"emulator={emulator}, slot={slot}, "
+                    f"{decision.ambiguous_message})"
+                )
             if decision.action == "skip":
                 skipped += 1
                 continue
@@ -686,34 +691,37 @@ class SaveBackendBase(ABC):
         local: LocalSave | None,
         server: dict[str, Any] | None,
         prev: SaveRecord | None,
-    ) -> tuple[bool | None, float | None]:
+    ) -> tuple[bool | None, float | None, str | None]:
         """Probe the resolved local path when the walker found nothing
         for this key but a server save exists.
 
-        Returns `(exists, mtime_or_None)` for use by `classify_for`'s
-        `local_path_exists` / `local_path_mtime` parameters; or
-        `(None, None)` when the case doesn't apply or the path can't be
-        resolved (e.g. Dolphin disc header unreadable). Pre-probe
-        callers (older sites) get `None` and fall back to the prior-
-        based reasoning.
+        Returns `(exists, mtime_or_None, candidate_filename_or_None)`.
+        The third element is the filename ferry would resolve for this
+        key — useful to surface in dry-run output for the
+        ambiguous/server-only cases where we don't have a `LocalSave`
+        to read the filename off. `(None, None, None)` is returned
+        when the case doesn't apply or the path can't be resolved
+        (e.g. Dolphin disc header unreadable). Pre-probe callers
+        (older sites) get all-None and fall back to the prior-based
+        reasoning.
 
         For the server-only case: derive the candidate save filename
         from the prior record (preferred — it's the filename ferry
         last wrote) or from the server response (fallback). Resolve
         through the backend's `_resolve_local_path` and stat. Failures
-        return `(False, None)` for "path doesn't exist" semantics —
-        the caller decides whether that means download-to-restore or
-        skip.
+        return `(False, None, candidate_filename)` for "path doesn't
+        exist" semantics — the caller decides whether that means
+        download-to-restore or skip.
         """
         if local is not None or server is None:
-            return None, None
+            return None, None, None
         candidate_filename = (
             prev.save_filename
             if prev is not None
             else strip_datetime_tag(server.get("file_name") or "") or None
         )
         if not candidate_filename:
-            return None, None
+            return None, None, None
         try:
             dest = self._resolve_local_path(rom, emulator, slot, candidate_filename, result=None)
         except Exception:
@@ -721,21 +729,21 @@ class SaveBackendBase(ABC):
                 "_resolve_local_path raised while probing for orphan key %r",
                 (rom.rom_id, emulator, slot),
             )
-            return None, None
+            return None, None, candidate_filename
         if dest is None:
-            return None, None
+            return None, None, candidate_filename
         try:
             stat = dest.stat()
         except FileNotFoundError:
-            return False, None
+            return False, None, candidate_filename
         except OSError:
             logger.warning(
                 "could not stat resolved local path %s for orphan key %r",
                 dest,
                 (rom.rom_id, emulator, slot),
             )
-            return True, None
-        return True, stat.st_mtime
+            return True, None, candidate_filename
+        return True, stat.st_mtime, candidate_filename
 
     def _process_key(
         self,
@@ -747,7 +755,7 @@ class SaveBackendBase(ABC):
         prev: SaveRecord | None,
         result: SaveSyncResult,
     ) -> tuple[bool, SaveRecord | None]:
-        path_exists, path_mtime = self._probe_local_path_for_server_only(
+        path_exists, path_mtime, candidate = self._probe_local_path_for_server_only(
             rom, emulator, slot, local, server, prev
         )
         decision = classify_for(
@@ -760,7 +768,12 @@ class SaveBackendBase(ABC):
         if decision.conflict_resolved:
             result.conflicts_resolved += 1
         if decision.ambiguous_message is not None:
-            result.ambiguous.append(f"rom_id={rom.rom_id} ({decision.ambiguous_message})")
+            filename = local.save_filename if local else (candidate or "?")
+            result.ambiguous.append(
+                f"{rom.name} — {filename} (rom_id={rom.rom_id}, "
+                f"emulator={emulator}, slot={slot}, "
+                f"{decision.ambiguous_message})"
+            )
 
         if decision.action == "skip":
             result.skipped += 1
