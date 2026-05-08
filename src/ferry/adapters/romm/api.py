@@ -1,3 +1,18 @@
+# Derived from decky-romm-sync (GPL-3.0-only):
+#   py_modules/adapters/romm/romm_api.py
+# Lifted in ferry's checkpoint 3 (2026-04). Significant modifications:
+#   - Reduced to the ferry-needed surface (saves, devices, ROMs, collections,
+#     platforms, users); dropped firmware / notes / virtual-collection /
+#     heartbeat / metadata-summary endpoints not currently used.
+#   - Merged decky's `download_save` and `download_save_content` into a
+#     single `download_save(..., optimistic=...)`.
+#   - `delete_server_saves` → `delete_saves` (the adapter is already
+#     RomM-namespaced).
+#   - URL params via httpx `params=...` rather than hand-built query strings,
+#     so reserved characters round-trip correctly.
+#   - `list_roms` paginates internally (page-and-merge loop) instead of
+#     exposing limit/offset to callers.
+
 import urllib.parse
 from pathlib import Path
 from typing import Any

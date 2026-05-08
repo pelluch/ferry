@@ -68,7 +68,19 @@ ferry uninstall-units      # disable timer, remove unit files
 uv tool uninstall ferry    # then remove the binary
 ```
 
+## Credits
+
+ferry is built on top of foundational work from
+[decky-romm-sync](https://github.com/danielcopper/decky-romm-sync) by
+Daniel Copper ([@danielcopper](https://github.com/danielcopper)),
+licensed under GPL-3.0. ferry inherits and adapts substantial parts of
+that codebase — including the save-conflict resolution model, the RomM
+HTTP/API adapter, the RetroArch config and core-info parsing, and the
+RomM-slug → ES-DE platform-directory map. Per-file headers in the
+relevant modules call out exactly what was lifted and what changed; see
+DESIGN.md §6 for the full reuse plan.
+
 ## License
 
-GPL-3.0-only. Substantial code is lifted from
-[decky-romm-sync](https://github.com/) (GPL-3.0); see `LICENSE`.
+GPL-3.0-only; see [LICENSE](LICENSE) for the full text. Code derived
+from decky-romm-sync (GPL-3.0) is redistributed under the same license.
