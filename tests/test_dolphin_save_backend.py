@@ -204,6 +204,9 @@ def test_sync_downloads_server_gci_with_no_local(tmp_path: Path) -> None:
     respx.get(f"{BASE_URL}/api/saves/42/content").mock(
         return_value=httpx.Response(200, content=download_bytes)
     )
+    respx.post(f"{BASE_URL}/api/saves/42/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 42})
+    )
 
     headers = {str(rp): DiscHeader(game_code="GM8E", maker_code="01", region="NTSC-U")}
     backend, http = _make_backend(install, roms_base=roms_base, headers=headers)
@@ -244,6 +247,9 @@ def test_sync_download_strips_romm_datetime_tag_from_filename(tmp_path: Path) ->
     )
     respx.get(f"{BASE_URL}/api/saves/42/content").mock(
         return_value=httpx.Response(200, content=download_bytes)
+    )
+    respx.post(f"{BASE_URL}/api/saves/42/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 42})
     )
 
     headers = {str(rp): DiscHeader(game_code="GM8E", maker_code="01", region="NTSC-U")}
@@ -576,6 +582,9 @@ def test_sync_redownloads_when_local_file_was_deleted_after_prior_sync(
                 )
             ],
         )
+    )
+    respx.post(f"{BASE_URL}/api/saves/35/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 35})
     )
     respx.get(f"{BASE_URL}/api/saves/35/content").mock(
         return_value=httpx.Response(200, content=download_bytes)

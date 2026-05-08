@@ -218,6 +218,9 @@ def test_sync_downloads_server_save_with_no_local(tmp_path: Path) -> None:
     respx.get(f"{BASE_URL}/api/saves/99/content").mock(
         return_value=httpx.Response(200, content=b"server-payload")
     )
+    respx.post(f"{BASE_URL}/api/saves/99/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 99})
+    )
 
     backend, http = _make_backend(install)
     with http:
@@ -229,6 +232,116 @@ def test_sync_downloads_server_save_with_no_local(tmp_path: Path) -> None:
     new_saves = result.updated_roms[1].saves
     assert new_saves[0].server_save_id == 99
     assert new_saves[0].emulator == "retroarch-snes9x"
+
+
+@respx.mock
+def test_download_sends_optimistic_false_and_calls_confirm(tmp_path: Path) -> None:
+    """v3.5 contract: download URL carries `optimistic=false` and the confirm
+    POST fires after a successful local write."""
+    saves_dir = tmp_path / "saves"
+    install = _make_install(saves_dir, sort_by_core=True)
+    rom = _make_rom(rom_id=1, source_filename="Mario.zip")
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[_server_save(save_id=77, rom_id=1, file_name="Mario.srm")],
+        )
+    )
+    download_route = respx.get(url__regex=rf"{BASE_URL}/api/saves/77/content.*").mock(
+        return_value=httpx.Response(200, content=b"server-payload")
+    )
+    confirm_route = respx.post(f"{BASE_URL}/api/saves/77/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 77})
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1
+    assert download_route.called
+    assert "optimistic=false" in str(download_route.calls.last.request.url)
+    assert confirm_route.called
+    body = confirm_route.calls.last.request.content
+    assert b"dev-1" in body
+    # SaveRecord written only because confirm succeeded.
+    assert result.updated_roms[1].saves[0].server_save_id == 77
+
+
+@respx.mock
+def test_download_confirm_failure_leaves_no_save_record(tmp_path: Path) -> None:
+    """If confirm_download fails, the local file stays on disk (we don't roll
+    back the bytes), but the SaveRecord is NOT updated and the download is
+    NOT counted as successful — `properly synced` requires confirm to land.
+    Server's `device.last_synced_at` stays at its previous value, so the next
+    sync will re-classify and re-try the download.
+    """
+    saves_dir = tmp_path / "saves"
+    install = _make_install(saves_dir, sort_by_core=True)
+    rom = _make_rom(rom_id=1, source_filename="Mario.zip")
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[_server_save(save_id=88, rom_id=1, file_name="Mario.srm")],
+        )
+    )
+    respx.get(f"{BASE_URL}/api/saves/88/content").mock(
+        return_value=httpx.Response(200, content=b"bytes")
+    )
+    confirm_route = respx.post(f"{BASE_URL}/api/saves/88/downloaded").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    # File IS on disk (atomic write happened before the confirm RPC).
+    assert (saves_dir / "snes9x" / "Mario.srm").read_bytes() == b"bytes"
+    # But ferry doesn't claim success — no SaveRecord written, no count bumped,
+    # and the failure surfaces clearly.
+    assert result.downloaded == 0
+    assert result.updated_roms == {}
+    assert confirm_route.called
+    assert any("confirm failed" in f for f in result.failed)
+
+
+@respx.mock
+def test_download_failure_does_not_call_confirm(tmp_path: Path) -> None:
+    """A failed GET must NOT trigger the confirm RPC — the bytes never made it
+    to disk, so committing server-side last_synced_at would be a lie."""
+    saves_dir = tmp_path / "saves"
+    install = _make_install(saves_dir, sort_by_core=True)
+    rom = _make_rom(rom_id=1, source_filename="Mario.zip")
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[_server_save(save_id=66, rom_id=1, file_name="Mario.srm")],
+        )
+    )
+    download_route = respx.get(f"{BASE_URL}/api/saves/66/content").mock(
+        return_value=httpx.Response(500, json={"detail": "transient"})
+    )
+    confirm_route = respx.post(f"{BASE_URL}/api/saves/66/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 66})
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert download_route.called
+    # Confirm must NOT fire — no successful write happened.
+    assert not confirm_route.called
+    assert result.downloaded == 0
+    assert any("download" in f for f in result.failed)
+    assert result.updated_roms == {}
 
 
 @respx.mock
@@ -632,6 +745,9 @@ def test_download_strips_romm_datetime_tag_from_filename(tmp_path: Path) -> None
     respx.get(f"{BASE_URL}/api/saves/42/content").mock(
         return_value=httpx.Response(200, content=b"data")
     )
+    respx.post(f"{BASE_URL}/api/saves/42/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 42})
+    )
 
     backend, http = _make_backend(install)
     with http:
@@ -713,6 +829,9 @@ def test_download_uses_core_info_for_canonical_dir_casing(tmp_path: Path) -> Non
     respx.get(f"{BASE_URL}/api/saves/99/content").mock(
         return_value=httpx.Response(200, content=b"data")
     )
+    respx.post(f"{BASE_URL}/api/saves/99/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 99})
+    )
 
     backend, http = _make_backend(install)
     with http:
@@ -747,6 +866,9 @@ def test_download_works_when_dest_and_tmp_are_different_filesystems(tmp_path: Pa
     )
     respx.get(f"{BASE_URL}/api/saves/1/content").mock(
         return_value=httpx.Response(200, content=b"data")
+    )
+    respx.post(f"{BASE_URL}/api/saves/1/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 1})
     )
 
     backend, http = _make_backend(install)
@@ -799,6 +921,9 @@ def test_sync_picks_latest_server_save_when_slot_has_history(tmp_path: Path) -> 
     # Only the latest (id=11) should be downloaded.
     download_route = respx.get(f"{BASE_URL}/api/saves/11/content").mock(
         return_value=httpx.Response(200, content=b"latest")
+    )
+    respx.post(f"{BASE_URL}/api/saves/11/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 11})
     )
 
     backend, http = _make_backend(install)

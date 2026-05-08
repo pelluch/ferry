@@ -853,6 +853,22 @@ class SaveBackendBase(ABC):
             result.failed.append(f"download {rom.name} ({local_filename}): {exc}")
             return None
 
+        # v3.5 server-as-arbiter: bytes are on disk (atomic via .part rename),
+        # but the SaveRecord — which represents "properly synced" locally —
+        # is only written after `confirm_download` succeeds. RomM's
+        # `device.last_synced_at` for this slot only advances on confirm,
+        # so a failure here leaves both sides at their previous state and
+        # the next sync re-tries. The local file stays on disk and will be
+        # atomically overwritten by the next download.
+        try:
+            self._api.confirm_download(save_id, self._device_id)
+        except RommApiError as exc:
+            result.failed.append(
+                f"download {rom.name} ({local_filename}): bytes written but "
+                f"confirm failed ({exc}); next sync will retry"
+            )
+            return None
+
         result.downloaded += 1
         return SaveRecord(
             emulator=emulator,

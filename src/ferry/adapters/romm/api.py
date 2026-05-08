@@ -186,15 +186,17 @@ class RommApi:
         dest_path: Path,
         *,
         device_id: str | None = None,
-        optimistic: bool = True,
+        optimistic: bool = False,
     ) -> DownloadResult:
         """GET /api/saves/{id}/content — stream a save to disk.
 
-        With `device_id` and `optimistic=True` (RomM's default), the server
-        records the device's `last_synced_at` as part of the download —
-        saves an extra round-trip vs. confirming after the fact. Pass
-        `optimistic=False` and call `confirm_download` separately when the
-        client wants to commit only after a successful local write.
+        Default is `optimistic=False`: server commits this device's
+        `last_synced_at` only after `confirm_download` is called
+        post-write, so a failure between GET and confirm leaves
+        server-side state at its previous value and the next sync
+        naturally retries. Pass `optimistic=True` to opt back into
+        RomM's default GET-time commit (saves a round-trip but loses
+        the server-as-arbiter recovery property).
         """
         path = f"/api/saves/{save_id}/content"
         params: dict[str, Any] = {}

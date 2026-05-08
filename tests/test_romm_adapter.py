@@ -649,9 +649,10 @@ def test_download_save_streams_to_disk(tmp_path) -> None:
 
 
 @respx.mock
-def test_download_save_with_device_id_optimistic_true(tmp_path) -> None:
-    """`optimistic` defaults to True — server records sync at download time;
-    no `optimistic` query param emitted."""
+def test_download_save_with_device_id_optimistic_default_false(tmp_path) -> None:
+    """v3.5: `optimistic` defaults to False — server commits this device's
+    `last_synced_at` only after `confirm_download`, so transient I/O failures
+    naturally re-trigger next sync."""
     payload = b"data"
     route = respx.get(url__regex=rf"{BASE_URL}/api/saves/9/content.*").mock(
         return_value=httpx.Response(200, content=payload)
@@ -661,21 +662,23 @@ def test_download_save_with_device_id_optimistic_true(tmp_path) -> None:
         api.download_save(9, tmp_path / "out.srm", device_id="dev-1")
     sent = str(route.calls.last.request.url)
     assert "device_id=dev-1" in sent
-    assert "optimistic=" not in sent
+    assert "optimistic=false" in sent
 
 
 @respx.mock
-def test_download_save_with_device_id_optimistic_false(tmp_path) -> None:
+def test_download_save_with_device_id_optimistic_true_explicit(tmp_path) -> None:
+    """Explicit `optimistic=True` opts back into RomM's GET-time commit; no
+    `optimistic` query param is sent (RomM's own default)."""
     payload = b"data"
     route = respx.get(url__regex=rf"{BASE_URL}/api/saves/9/content.*").mock(
         return_value=httpx.Response(200, content=payload)
     )
     with RommHttpAdapter(make_config()) as http:
         api = RommApi(http)
-        api.download_save(9, tmp_path / "out.srm", device_id="dev-1", optimistic=False)
+        api.download_save(9, tmp_path / "out.srm", device_id="dev-1", optimistic=True)
     sent = str(route.calls.last.request.url)
     assert "device_id=dev-1" in sent
-    assert "optimistic=false" in sent
+    assert "optimistic=" not in sent
 
 
 # ---------------------------------------------------------------------------
