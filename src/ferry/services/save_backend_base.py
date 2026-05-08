@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from ferry.adapters.romm import RommApi, RommApiError
+from ferry.adapters.romm import RommApi, RommApiError, RommConflictError
 from ferry.domain.iso_time import parse_iso_to_epoch
 from ferry.domain.save_conflicts import Classification, classify
 from ferry.domain.save_local import LocalSave
@@ -67,6 +67,13 @@ class SaveSyncResult:
     downloaded: int = 0
     skipped: int = 0
     conflicts_resolved: int = 0
+    # 409 from a strict-mode upload: server says this device's `last_synced_at`
+    # is older than the slot's `updated_at`, so another device has uploaded
+    # since we last sync'd. Counted separately from `failed` (which is
+    # network/I/O failures) and from `skipped` (which is no-op classify
+    # outcomes) — the next sync re-classifies with fresh server state and
+    # naturally pivots to download.
+    upload_conflicts: int = 0
     ambiguous: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -793,8 +800,17 @@ class SaveBackendBase(ABC):
                 save_id=save_id,
                 device_id=self._device_id,
                 slot=local.slot,
-                overwrite=True,
             )
+        except RommConflictError:
+            # Server-as-arbiter: another device uploaded since this device's
+            # last sync. Preserve the prior verbatim — next sync re-classifies
+            # with fresh server state and naturally pivots to download.
+            result.upload_conflicts += 1
+            result.warnings.append(
+                f"upload {rom.name} ({local.save_filename}): server has a newer "
+                f"save than your last sync; will reconcile on next sync"
+            )
+            return prev
         except RommApiError as exc:
             result.failed.append(f"upload {rom.name} ({local.save_filename}): {exc}")
             return prev

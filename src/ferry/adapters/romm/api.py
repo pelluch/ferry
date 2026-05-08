@@ -158,10 +158,13 @@ class RommApi:
     ) -> dict[str, Any]:
         """POST /api/saves (new) or PUT /api/saves/{id} (update existing).
 
-        `device_id` participates in RomM's conflict detection: if the slot
-        has been updated since this device's last sync, the server returns
-        409. Caller resolves via `domain.save_conflicts.resolve_newest` and
-        retries with `overwrite=True`.
+        With the default `overwrite=False`, RomM compares this device's
+        `last_synced_at` for the slot against the slot's `updated_at` and
+        returns 409 if another device has uploaded since this device's
+        last sync — the server-as-arbiter check ferry relies on to avoid
+        clobbering newer remote saves with stale local state. Callers
+        catch `RommConflictError` and treat it as skip-with-warning;
+        the next sync naturally re-classifies with fresh server state.
         """
         params: dict[str, Any] = {"rom_id": rom_id, "emulator": emulator}
         if device_id is not None:

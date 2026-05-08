@@ -515,6 +515,70 @@ def test_list_saves_failure_returns_failed_result(tmp_path: Path) -> None:
 
 
 @respx.mock
+def test_upload_409_skips_with_warning_and_preserves_prior(tmp_path: Path) -> None:
+    """v3.5 server-as-arbiter: a 409 from upload counts as `upload_conflicts`,
+    not `uploaded` and not `failed`. The prior SaveRecord is preserved
+    verbatim so the next sync re-classifies with fresh server state.
+    """
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    save = saves_dir / "snes9x" / "Mario.srm"
+    save.write_bytes(b"local-progress")
+    install = _make_install(saves_dir)
+    # Build a prior so we can verify it's preserved unchanged.
+    prior = SaveRecord(
+        emulator="retroarch-snes9x",
+        slot="default",
+        save_filename="Mario.srm",
+        last_sync_md5="aa" * 16,
+        last_sync_server_size=1024,
+        last_sync_server_updated_at="2026-04-01T00:00:00Z",
+        last_synced_at="2026-04-01T00:00:00Z",
+        server_save_id=5,
+    )
+    rom = _make_rom(rom_id=1, saves=(prior,))
+    state = _make_state([rom])
+
+    # Server has a newer save than our prior — different updated_at, different md5.
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                _server_save(
+                    save_id=5,
+                    rom_id=1,
+                    file_name="Mario.srm",
+                    md5="bb" * 16,
+                    updated_at="2026-04-25T12:00:00Z",
+                )
+            ],
+        )
+    )
+    upload_route = respx.put(f"{BASE_URL}/api/saves/5").mock(
+        return_value=httpx.Response(409, json={"detail": "Slot has a newer save"})
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert upload_route.called
+    # Strict-mode confirmation: the upload was sent without overwrite=true.
+    sent_url = str(upload_route.calls.last.request.url)
+    assert "overwrite=" not in sent_url
+    # Outcome accounting: not uploaded, not failed, surfaced as upload_conflicts.
+    assert result.uploaded == 0
+    assert result.upload_conflicts == 1
+    assert result.failed == []
+    # User-visible warning surfaces the situation.
+    assert any("server has a newer save" in w for w in result.warnings)
+    # Prior SaveRecord preserved exactly — next sync will re-classify.
+    if 1 in result.updated_roms:
+        # A prior-only rewrite is acceptable as long as the record is identical.
+        assert result.updated_roms[1].saves == (prior,)
+
+
+@respx.mock
 def test_upload_failure_records_in_result(tmp_path: Path) -> None:
     saves_dir = tmp_path / "saves"
     (saves_dir / "snes9x").mkdir(parents=True)

@@ -794,6 +794,11 @@ def _print_save_sync_summary(result: SaveSyncResult, *, label: str = "Save") -> 
     click.echo(f"  Skipped:    {result.skipped}")
     if result.conflicts_resolved:
         click.echo(f"  Conflicts resolved: {result.conflicts_resolved}")
+    if result.upload_conflicts:
+        click.echo(
+            f"  Upload conflicts: {result.upload_conflicts} "
+            f"(server has newer; next sync will resolve)"
+        )
     if result.ambiguous:
         click.echo("")
         click.echo("Ambiguous (within tolerance — skipped, will re-evaluate next sync):")
