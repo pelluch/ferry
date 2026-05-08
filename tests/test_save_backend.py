@@ -23,6 +23,7 @@ from ferry.services.save_backend import (
     SaveSyncResult,
     get_or_register_device,
 )
+from ferry.services.save_backend_base import index_server_saves
 
 BASE_URL = "https://romm.example.tld"
 
@@ -743,6 +744,40 @@ def test_sync_picks_latest_server_save_when_slot_has_history(tmp_path: Path) -> 
     assert download_route.called
     assert result.downloaded == 1
     assert result.updated_roms[1].saves[0].server_save_id == 11
+
+
+def test_index_server_saves_orders_by_instant_not_lexically() -> None:
+    """Regression: mixed-offset timestamps must order by instant, not by string.
+
+    `2026-05-05T11:00:00+02:00` (= 09:00 UTC) is EARLIER than
+    `2026-05-05T10:00:00Z`, but lexical compare says the `+02:00` form is
+    later. RomM happens to serve UTC consistently today; this guards against
+    silent regression if it ever serves mixed offsets.
+    """
+    earlier = {
+        "id": 100,
+        "rom_id": 1,
+        "emulator": "retroarch-snes9x",
+        "slot": "default",
+        "file_name": "earlier.srm",
+        "updated_at": "2026-05-05T11:00:00+02:00",  # 09:00 UTC
+    }
+    later = {
+        "id": 101,
+        "rom_id": 1,
+        "emulator": "retroarch-snes9x",
+        "slot": "default",
+        "file_name": "later.srm",
+        "updated_at": "2026-05-05T10:00:00Z",  # 10:00 UTC
+    }
+    # Hand `earlier` to the indexer LAST so a buggy lexical max() picks it.
+    indexed = index_server_saves(
+        [later, earlier],
+        emulator_matches=lambda emu: emu.startswith("retroarch-"),
+        default_slot="default",
+    )
+    picked = indexed[(1, "retroarch-snes9x", "default")]
+    assert picked["id"] == 101  # the truly-later one
 
 
 @respx.mock

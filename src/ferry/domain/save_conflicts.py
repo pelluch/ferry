@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from ferry.domain.iso_time import parse_iso
+
 Action = Literal["skip", "upload", "download", "conflict"]
 Resolution = Literal["upload", "download", "ambiguous"]
 ClassifiedAction = Literal["upload", "download", "skip", "ambiguous", "drop_prior"]
@@ -361,17 +363,12 @@ def server_changed_fast(
     compare would treat the same save as "changed" on the very next
     sync. Truncating to seconds matches RomM's coarsest serialization.
     """
-    if not stored_updated_at or not server_updated_at:
+    stored_dt = parse_iso(stored_updated_at)
+    server_dt = parse_iso(server_updated_at)
+    if stored_dt is None or server_dt is None:
         return None
-    try:
-        stored_dt = datetime.fromisoformat(stored_updated_at.replace("Z", "+00:00")).replace(
-            microsecond=0
-        )
-        server_dt = datetime.fromisoformat(server_updated_at.replace("Z", "+00:00")).replace(
-            microsecond=0
-        )
-    except (ValueError, AttributeError):
-        return None
+    stored_dt = stored_dt.replace(microsecond=0)
+    server_dt = server_dt.replace(microsecond=0)
     if stored_dt != server_dt:
         return None
     if stored_size is None or server_size is None:
@@ -413,9 +410,8 @@ def resolve_newest(
     Parse failures on `server_updated_at` also return `"ambiguous"`,
     since we can't compare what we can't parse.
     """
-    try:
-        server_dt = datetime.fromisoformat(server_updated_at.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    server_dt = parse_iso(server_updated_at)
+    if server_dt is None:
         return "ambiguous"
 
     local_dt = datetime.fromtimestamp(local_mtime, tz=UTC)

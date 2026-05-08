@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ferry.adapters.romm import RommApi, RommApiError
+from ferry.domain.iso_time import parse_iso_to_epoch
 from ferry.domain.save_conflicts import Classification, classify
 from ferry.domain.save_local import LocalSave
 from ferry.domain.save_plan import PlannedSaveAction, SavePlan
@@ -161,11 +162,17 @@ def index_server_saves(
 
 
 def _updated_after(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """ISO-8601 timestamps sort lexicographically; tie-break by save id."""
-    a_ts = a.get("updated_at") or ""
-    b_ts = b.get("updated_at") or ""
-    if a_ts != b_ts:
-        return a_ts > b_ts
+    """Compare two server-save dicts by `updated_at`; tie-break by save id.
+
+    Parses to epoch seconds rather than lexically so equivalent-instant
+    different-offset timestamps (`...Z` vs `...+02:00`) order correctly.
+    Unparseable timestamps fall through to 0.0 — they sort to the bottom
+    instead of polluting the order.
+    """
+    a_epoch = parse_iso_to_epoch(a.get("updated_at")) or 0.0
+    b_epoch = parse_iso_to_epoch(b.get("updated_at")) or 0.0
+    if a_epoch != b_epoch:
+        return a_epoch > b_epoch
     a_id = a.get("id") or 0
     b_id = b.get("id") or 0
     return a_id > b_id
