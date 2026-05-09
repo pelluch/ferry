@@ -168,7 +168,7 @@ def discover_dolphin_installs(home: Path | None = None) -> list[DolphinInstall]:
                 config_path=config_path,
                 region_encoding=profile.region_encoding,
                 settings=parse_gamecube_memcard_settings(config_path),
-                has_saves=_has_gci_files(saves_root),
+                has_saves=_has_gci_files(saves_root) or _has_wii_nand_saves(wii_saves_root),
                 wii_saves_root=wii_saves_root,
             )
         )
@@ -183,6 +183,29 @@ def select_active_install(installs: list[DolphinInstall]) -> DolphinInstall | No
     table.
     """
     return select_active(installs, has_active=lambda i: i.has_saves)
+
+
+def _has_wii_nand_saves(wii_saves_root: Path | None) -> bool:
+    """True iff any file exists under a `<TID_HIGH>/<TID_LOW>/data/` subdir.
+
+    Used as the Wii presence signal that folds into `has_saves`. Mirrors
+    `_has_gci_files`'s shape (early-return on first match, swallows OSError).
+    `data/` directories always carry actual save bytes when Dolphin has
+    written them — empty `data/` directories aren't created by Dolphin
+    on its own, so a single file under one is sufficient evidence.
+    """
+    if wii_saves_root is None or not wii_saves_root.is_dir():
+        return False
+    try:
+        for data_dir in wii_saves_root.glob("*/*/data"):
+            if not data_dir.is_dir():
+                continue
+            for entry in data_dir.rglob("*"):
+                if entry.is_file():
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def _has_gci_files(saves_root: Path) -> bool:

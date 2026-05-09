@@ -67,6 +67,7 @@ from ferry.services.sync_executor import (
 )
 from ferry.services.sync_lock import LockHeld, acquire_sync_lock, default_lock_path
 from ferry.services.trash import default_trash_root, purge_expired
+from ferry.services.wii_save_backend import WiiSaveBackend
 
 logger = logging.getLogger(__name__)
 
@@ -448,37 +449,109 @@ def _preview_dolphin(
     device_id: str | None,
     full: bool,
 ) -> None:
+    """Dry-run preview for both Dolphin-family backends (GC + Wii).
+
+    Resolves the Dolphin install once, then runs each backend's
+    preflight + plan independently. A skip on one backend doesn't
+    block the other.
+    """
     assert config.saves is not None
+    if config.destination is None:
+        return  # caller-side guard; defensive
     installs = discover_dolphin_installs()
     if not installs:
-        click.echo("Save sync (Dolphin): would skip (no install detected)")
+        for label in (GameCubeSaveBackend.backend_label, WiiSaveBackend.backend_label):
+            click.echo(f"Save sync ({label}): would skip (no install detected)")
         return
     install = _resolve_dolphin_install_for_preview(config.saves, installs)
     if install is None:
         return  # message already printed
+    tool = discover_dolphin_tool()
+    if tool is None:
+        for label in (GameCubeSaveBackend.backend_label, WiiSaveBackend.backend_label):
+            click.echo(f"Save sync ({label}): would skip (dolphin-tool not found)")
+        return
+    cache = DiscHeaderCache(default_cache_path())
+    _preview_gamecube(
+        install=install,
+        api=api,
+        state=state,
+        device_id=device_id,
+        tool=tool,
+        cache=cache,
+        roms_base=config.destination.roms_base,
+        full=full,
+    )
+    _preview_wii(
+        install=install,
+        api=api,
+        state=state,
+        device_id=device_id,
+        tool=tool,
+        cache=cache,
+        roms_base=config.destination.roms_base,
+        full=full,
+    )
+
+
+def _preview_gamecube(
+    *,
+    install: DolphinInstall,
+    api: RommApi,
+    state: LibraryState,
+    device_id: str | None,
+    tool,
+    cache: DiscHeaderCache,
+    roms_base: Path,
+    full: bool,
+) -> None:
+    label = GameCubeSaveBackend.backend_label
     if install.slot_a_mode != "gci_folder":
         click.echo(
-            f"Save sync (Dolphin): would skip — Slot A mode is "
+            f"Save sync ({label}): would skip — Slot A mode is "
             f"{install.slot_a_mode!r} (need GCI Folder)"
         )
         return
-    tool = discover_dolphin_tool()
-    if tool is None:
-        click.echo("Save sync (Dolphin): would skip (dolphin-tool not found)")
-        return
-    if config.destination is None:
-        return  # caller-side guard; defensive
-    cache = DiscHeaderCache(default_cache_path())
     backend = GameCubeSaveBackend(
         install=install,
         api=api,
         device_id=device_id or "",
         tool=tool,
-        roms_base=config.destination.roms_base,
+        roms_base=roms_base,
         cache=cache,
         log=logger,
     )
-    click.echo(f"Save sync (Dolphin): targeting {install.source} @ {install.saves_root}")
+    click.echo(f"Save sync ({label}): targeting {install.source} @ {install.saves_root}")
+    plan = backend.plan(state)
+    _print_save_plan(plan, full=full)
+
+
+def _preview_wii(
+    *,
+    install: DolphinInstall,
+    api: RommApi,
+    state: LibraryState,
+    device_id: str | None,
+    tool,
+    cache: DiscHeaderCache,
+    roms_base: Path,
+    full: bool,
+) -> None:
+    label = WiiSaveBackend.backend_label
+    if install.wii_saves_root is None:
+        # Wii layout not pinned for this install profile (today only
+        # retrodeck has one). Stay quiet — not user-actionable.
+        return
+    backend = WiiSaveBackend(
+        install=install,
+        api=api,
+        device_id=device_id or "",
+        tool=tool,
+        roms_base=roms_base,
+        cache=cache,
+        log=logger,
+    )
+    click.echo(f"Save sync ({label}): targeting {install.source} @ {install.wii_saves_root}")
     plan = backend.plan(state)
     _print_save_plan(plan, full=full)
 
@@ -487,7 +560,8 @@ def _resolve_dolphin_install_for_preview(
     saves_cfg: SavesConfig, installs: list[DolphinInstall]
 ) -> DolphinInstall | None:
     # Outer caller already printed the no-installs message; we never
-    # see NO_INSTALLS at this site.
+    # see NO_INSTALLS at this site. The skip-message references both
+    # Dolphin-family labels since the resolution governs both backends.
     resolution = resolve_install(
         installs,
         configured_source=saves_cfg.dolphin_install,
@@ -572,11 +646,14 @@ def _prepare_save_backends(
     state: LibraryState,
     state_path,
 ) -> tuple[list[SaveBackend], LibraryState]:
-    """Build every configured save backend (RetroArch + Dolphin).
+    """Build every configured save backend (RetroArch + Dolphin GC + Wii).
 
-    Both backends share the device_id — registration runs once. On
-    blockers we surface a friendly one-liner per backend and continue
-    (a Dolphin failure doesn't block RetroArch sync, and vice versa).
+    All backends share the device_id — registration runs once. The two
+    Dolphin-family backends additionally share the install resolution,
+    `dolphin-tool` discovery, and disc-header cache. On blockers we
+    surface a friendly one-liner per backend and continue (a Dolphin
+    failure doesn't block RetroArch sync, and a Wii failure doesn't
+    block GC sync).
 
     Returns `(backends, state)` — `state` may be a new LibraryState if
     we just registered this client and cached the device_id.
@@ -618,11 +695,43 @@ def _prepare_save_backends(
         )
 
     if dolphin_install is not None:
-        dolphin_backend = _build_dolphin_backend(dolphin_install, config, api, device_id)
-        if dolphin_backend is not None:
-            backends.append(dolphin_backend)
+        backends.extend(_build_dolphin_family_backends(dolphin_install, config, api, device_id))
 
     return backends, state
+
+
+def _build_dolphin_family_backends(
+    install: DolphinInstall,
+    config: Config,
+    api: RommApi,
+    device_id: str,
+) -> list[SaveBackend]:
+    """Build GC + Wii backends from one Dolphin install.
+
+    Shared preflight (`dolphin-tool` discovery + disc-header cache)
+    runs once; each backend then applies its own filters. Either or
+    both may be skipped with a message.
+    """
+    if config.destination is None:
+        return []  # caller-side guard; defensive
+    tool = discover_dolphin_tool()
+    if tool is None:
+        click.echo("")
+        click.echo(
+            "save sync (Dolphin) skipped: dolphin-tool not found.\n"
+            "  Install Dolphin (native, RetroDECK, or EmuDeck Flatpak) — ferry "
+            "needs dolphin-tool to read GameCube/Wii disc headers."
+        )
+        return []
+    cache = DiscHeaderCache(default_cache_path())
+    backends: list[SaveBackend] = []
+    gc_backend = _build_gamecube_backend(install, config, api, device_id, tool, cache)
+    if gc_backend is not None:
+        backends.append(gc_backend)
+    wii_backend = _build_wii_backend(install, config, api, device_id, tool, cache)
+    if wii_backend is not None:
+        backends.append(wii_backend)
+    return backends
 
 
 def _select_retroarch_install(saves_cfg: SavesConfig) -> RetroArchInstall | None:
@@ -662,10 +771,12 @@ def _retroarch_skip_message(
 def _select_dolphin_install(saves_cfg: SavesConfig) -> DolphinInstall | None:
     """Apply the user's `dolphin_install` override or fall back to auto-select.
 
-    Skips the install when Slot A isn't in GCI Folder mode — v3 only
-    syncs GCI Folder saves; raw `.raw` memcards aren't supported.
-    NO_INSTALLS is silent here (RA may still be configured); other
-    failure reasons surface a `skipped:` line.
+    Returns the install regardless of GC- or Wii-specific filters
+    (Slot A mode for GC; `wii_saves_root is not None` for Wii) —
+    those land at backend-builder time so each backend can decide
+    independently. NO_INSTALLS is silent here (RA may still be
+    configured); other failure reasons surface a `skipped:` line
+    that covers the whole Dolphin family.
     """
     resolution = resolve_install(
         discover_dolphin_installs(),
@@ -673,24 +784,12 @@ def _select_dolphin_install(saves_cfg: SavesConfig) -> DolphinInstall | None:
         source_of=lambda i: i.source,
         has_active=lambda i: i.has_saves,
     )
-    selected = resolution.install
-    if selected is None:
+    if resolution.install is None:
         message = _dolphin_skip_message(resolution, saves_cfg)
         if message is not None:
             click.echo("")
             click.echo(message)
-        return None
-
-    if selected.slot_a_mode != "gci_folder":
-        click.echo("")
-        click.echo(
-            f"save sync (Dolphin) skipped: Slot A mode is "
-            f"{selected.slot_a_mode!r} on {selected.source}; ferry only syncs "
-            "GCI Folder saves. Switch in Dolphin Config > GameCube > Slot A."
-        )
-        return None
-
-    return selected
+    return resolution.install
 
 
 def _dolphin_skip_message(
@@ -715,27 +814,62 @@ def _dolphin_skip_message(
             return None
 
 
-def _build_dolphin_backend(
+def _build_gamecube_backend(
     install: DolphinInstall,
     config: Config,
     api: RommApi,
     device_id: str,
+    tool,
+    cache: DiscHeaderCache,
 ) -> GameCubeSaveBackend | None:
-    """Construct a GameCubeSaveBackend, or skip with a message if dolphin-tool
-    or roms_base aren't available."""
+    """Construct a GameCubeSaveBackend, or skip with a message if Slot A
+    isn't in GCI Folder mode (raw `.raw` memcards aren't supported).
+
+    `tool` and `cache` are shared with the Wii backend — both read the
+    same disc headers so caching across backends is the right call.
+    """
     if config.destination is None:
         return None  # caller guard checked this; defensive
-    tool = discover_dolphin_tool()
-    if tool is None:
+    if install.slot_a_mode != "gci_folder":
         click.echo("")
         click.echo(
-            "save sync (Dolphin) skipped: dolphin-tool not found.\n"
-            "  Install Dolphin (native, RetroDECK, or EmuDeck Flatpak) — ferry "
-            "needs dolphin-tool to read GameCube disc headers."
+            f"save sync ({GameCubeSaveBackend.backend_label}) skipped: Slot A mode is "
+            f"{install.slot_a_mode!r} on {install.source}; ferry only syncs "
+            "GCI Folder saves. Switch in Dolphin Config > GameCube > Slot A."
         )
         return None
-    cache = DiscHeaderCache(default_cache_path())
     return GameCubeSaveBackend(
+        install=install,
+        api=api,
+        device_id=device_id,
+        tool=tool,
+        roms_base=config.destination.roms_base,
+        cache=cache,
+        log=logger,
+    )
+
+
+def _build_wii_backend(
+    install: DolphinInstall,
+    config: Config,
+    api: RommApi,
+    device_id: str,
+    tool,
+    cache: DiscHeaderCache,
+) -> WiiSaveBackend | None:
+    """Construct a WiiSaveBackend, or skip silently when this install
+    profile doesn't have a verified Wii layout.
+
+    `wii_saves_root is None` means the install profile (emudeck-flatpak,
+    native — for v3.6) hasn't been mapped yet. Stay quiet rather than
+    nag: it's not user-actionable, and the GC backend may still
+    proceed on the same install.
+    """
+    if config.destination is None:
+        return None  # caller guard checked this; defensive
+    if install.wii_saves_root is None:
+        return None
+    return WiiSaveBackend(
         install=install,
         api=api,
         device_id=device_id,

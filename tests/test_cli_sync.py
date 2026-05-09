@@ -786,6 +786,64 @@ def test_dry_run_save_preview_reports_skip_when_no_install(tmp_path: Path, monke
 
 
 @respx.mock
+def test_dry_run_save_preview_emits_both_dolphin_labels_when_no_install(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No Dolphin install detected → both GC and Wii labels each get
+    their own `would skip` line. Verifies the preview prints under the
+    new disambiguated labels (`Dolphin (GameCube)` / `Dolphin (Wii)`)
+    rather than a single legacy `Dolphin` line."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    roms_base = tmp_path / "roms"
+    cfg = write_config_with_saves(tmp_path / "config.toml", roms_base=roms_base)
+    # No RA install, no Dolphin install — both Dolphin-family lines should fire.
+
+    mock_endpoints(collections=[{"id": 1, "name": "Steam Deck"}], rom_items=[])
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Save sync (Dolphin (GameCube)): would skip (no install detected)" in result.output
+    assert "Save sync (Dolphin (Wii)): would skip (no install detected)" in result.output
+
+
+@respx.mock
+def test_dry_run_save_preview_reports_dolphin_tool_missing_for_both_backends(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Dolphin install is detected but `dolphin-tool` isn't found —
+    both Dolphin-family backends report the same skip reason once each.
+
+    The dev machine may have RetroDECK installed via system flatpak
+    (which `discover_dolphin_tool` finds via an absolute `/var/lib/flatpak/app`
+    path that `monkeypatch.setenv("HOME", ...)` can't redirect), so the
+    test forces the missing case directly via monkeypatch.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Plant a RetroDECK Dolphin layout (saves_root only — config not needed
+    # for discovery).
+    rd_saves = tmp_path / "retrodeck" / "saves" / "gc" / "dolphin"
+    rd_saves.mkdir(parents=True)
+
+    # Force "dolphin-tool not found" regardless of the host environment.
+    # `ferry.cli.sync` resolves to the Click Command (re-exported at
+    # package level), not the module — grab the module from sys.modules.
+    import sys
+
+    cli_sync_module = sys.modules["ferry.cli.sync"]
+    monkeypatch.setattr(cli_sync_module, "discover_dolphin_tool", lambda: None)
+
+    roms_base = tmp_path / "roms"
+    cfg = write_config_with_saves(tmp_path / "config.toml", roms_base=roms_base)
+
+    mock_endpoints(collections=[{"id": 1, "name": "Steam Deck"}], rom_items=[])
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Save sync (Dolphin (GameCube)): would skip (dolphin-tool not found)" in result.output
+    assert "Save sync (Dolphin (Wii)): would skip (dolphin-tool not found)" in result.output
+
+
+@respx.mock
 def test_dry_run_save_preview_reports_disabled(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     roms_base = tmp_path / "roms"
