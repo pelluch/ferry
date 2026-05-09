@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from pathlib import Path
+from collections.abc import Iterable
 from typing import Any
 
 import click
@@ -45,13 +45,13 @@ from ferry.services.reconcile import (
     Classification,
     Confident,
     HashOnly,
+    MatchedFile,
     NameOnly,
     NoMatch,
     OrphanCandidate,
     build_index,
     classify,
     find_orphans,
-    synthesize_state,
     synthesize_state_from_match,
 )
 from ferry.services.sync_lock import LockHeld, acquire_sync_lock, default_lock_path
@@ -202,14 +202,20 @@ def _run_reconcile(
             click.echo("Nothing to adopt — no confident matches.")
         return
 
-    adopted_confident = _adopt_confident(
-        confident, config=config, state=state, state_path=state_path
+    adopted_confident = _adopt(
+        ((c.orphan, c.match) for c in confident),
+        config=config,
+        state=state,
     )
     adopted_name_only = 0
     if will_adopt_name_only:
-        adopted_name_only = _adopt_name_only(
-            name_only_singular, config=config, state=state, state_path=state_path
+        adopted_name_only = _adopt(
+            ((c.orphan, c.candidates[0]) for c in name_only_singular),
+            config=config,
+            state=state,
         )
+    if adopted_confident or adopted_name_only:
+        save_state(state, state_path)
 
     click.echo("")
     if adopted_name_only:
@@ -278,55 +284,28 @@ def _classify_all_orphans(
     return out
 
 
-def _adopt_confident(
-    confident: list[Confident],
+def _adopt(
+    pairs: Iterable[tuple[OrphanCandidate, MatchedFile]],
     *,
     config: Config,
     state: LibraryState,
-    state_path: Path,
 ) -> int:
-    """Add a state.json entry for each confident match."""
-    assert config.destination is not None
-    roms_base = config.destination.roms_base
-    adopted = 0
-    for c in confident:
-        transforms = config.transforms.for_platform(c.match.rom_data.get("platform_slug") or "")
-        rom_state = synthesize_state(c, roms_base=roms_base, transforms_for_platform=transforms)
-        state.roms[rom_state.rom_id] = rom_state
-        adopted += 1
-    if adopted:
-        save_state(state, state_path)
-    return adopted
+    """Add a state.json entry for each (orphan, match) pair. Mutates state.
 
-
-def _adopt_name_only(
-    name_only_singular: list[NameOnly],
-    *,
-    config: Config,
-    state: LibraryState,
-    state_path: Path,
-) -> int:
-    """Add a state.json entry for each single-rom_id NameOnly match.
-
-    Synthesis stores `output.md5` from the local file's bytes (which by
-    definition don't match the server's md5 for this category) and
-    `source_md5` from the server. The planner uses `source_updated_at`
-    for change detection, so a future RomM update will trigger a real
-    sync that overwrites this name-only adoption with server bytes —
-    which is the right behaviour: name-only is "trust me, this is the
-    right rom" until a real update arrives.
+    Caller batches confident vs name-only adoptions through this same
+    helper — they used to be two near-identical functions. For
+    name-only adoptions, `output.md5` (computed from local bytes) won't
+    match the server's md5 by definition; the planner uses
+    `source_updated_at` for change detection, so a future RomM update
+    will trigger a real sync that overwrites this with server bytes.
     """
     assert config.destination is not None
     adopted = 0
-    for n in name_only_singular:
-        # _name_only_rom_id confirmed single rom_id; pick the first match.
-        match = n.candidates[0]
+    for orphan, match in pairs:
         transforms = config.transforms.for_platform(match.rom_data.get("platform_slug") or "")
-        rom_state = synthesize_state_from_match(n.orphan, match, transforms_for_platform=transforms)
+        rom_state = synthesize_state_from_match(orphan, match, transforms_for_platform=transforms)
         state.roms[rom_state.rom_id] = rom_state
         adopted += 1
-    if adopted:
-        save_state(state, state_path)
     return adopted
 
 
