@@ -143,3 +143,184 @@ def test_hydrate_does_not_mutate_input_state(tmp_path: Path) -> None:
     assert hydrated == 1
     assert original.roms[1].source_romm_md5 is None  # untouched
     assert new_state.roms[1].source_romm_md5 is not None
+
+
+# ---------------------------------------------------------------------------
+# Resumability — checkpoint callback
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_fires_every_n_hydrated_entries(tmp_path: Path) -> None:
+    """With `checkpoint_every=2`, a 5-entry hydration fires at counts
+    2 and 4 — every multiple of N up to but not including the final
+    flush (which the caller does explicitly after the function returns)."""
+    for i in range(5):
+        _plant(tmp_path, f"gc/{i}.iso", f"content-{i}".encode())
+    state = LibraryState(
+        roms={i: _make_rom(i, output_path=f"gc/{i}.iso", source_romm_md5=None) for i in range(5)}
+    )
+    checkpoints: list[int] = []
+    hydrate_romm_md5(
+        state,
+        tmp_path,
+        on_checkpoint=lambda partial, count: checkpoints.append(count),
+        checkpoint_every=2,
+    )
+    assert checkpoints == [2, 4]
+
+
+def test_checkpoint_partial_state_carries_hydrated_entries_so_far(tmp_path: Path) -> None:
+    """The state passed to the callback has all so-far-hydrated entries
+    populated — so a caller persisting it gets a valid resume point."""
+    for i in range(3):
+        _plant(tmp_path, f"gc/{i}.iso", f"c-{i}".encode())
+    state = LibraryState(
+        roms={i: _make_rom(i, output_path=f"gc/{i}.iso", source_romm_md5=None) for i in range(3)}
+    )
+    snapshots: list[dict[int, str | None]] = []
+
+    def capture(partial: LibraryState, count: int) -> None:
+        snapshots.append({rid: r.source_romm_md5 for rid, r in partial.roms.items()})
+
+    hydrate_romm_md5(state, tmp_path, on_checkpoint=capture, checkpoint_every=1)
+    # Three checkpoints fired (one per rom); each successive one has
+    # one more entry populated.
+    assert len(snapshots) == 3
+    populated_counts = [sum(1 for v in s.values() if v) for s in snapshots]
+    assert populated_counts == [1, 2, 3]
+
+
+def test_resume_after_simulated_interrupt_completes_remaining_entries(tmp_path: Path) -> None:
+    """Run hydration, simulate an interrupt by raising from the checkpoint
+    callback after the first entry. The persisted partial state has
+    one entry populated; a subsequent run picks up the remaining two
+    without re-hashing the first.
+    """
+    for i in range(3):
+        _plant(tmp_path, f"gc/{i}.iso", f"content-{i}".encode())
+    state = LibraryState(
+        roms={i: _make_rom(i, output_path=f"gc/{i}.iso", source_romm_md5=None) for i in range(3)}
+    )
+
+    persisted: list[LibraryState] = []
+
+    class _Interrupt(Exception):
+        pass
+
+    def crash_after_first(partial: LibraryState, count: int) -> None:
+        persisted.append(partial)
+        raise _Interrupt("simulated interrupt mid-hydration")
+
+    import contextlib
+
+    with contextlib.suppress(_Interrupt):
+        hydrate_romm_md5(state, tmp_path, on_checkpoint=crash_after_first, checkpoint_every=1)
+
+    # First-run snapshot: exactly one entry populated.
+    snapshot = persisted[-1]
+    populated_first_run = {rid for rid, r in snapshot.roms.items() if r.source_romm_md5}
+    assert len(populated_first_run) == 1
+
+    # Second run: pass the persisted partial state back in. The already-
+    # hydrated entry is left alone; the other two get hashed.
+    second_state, second_hydrated = hydrate_romm_md5(snapshot, tmp_path)
+    assert second_hydrated == 2  # the two we didn't get to last time
+    assert all(r.source_romm_md5 for r in second_state.roms.values())
+    # The original entry's hash hasn't been recomputed — preserved verbatim.
+    preserved_id = next(iter(populated_first_run))
+    preserved_hash = snapshot.roms[preserved_id].source_romm_md5
+    assert second_state.roms[preserved_id].source_romm_md5 == preserved_hash
+
+
+def test_no_checkpoint_callback_still_works(tmp_path: Path) -> None:
+    """Backward-compat: calling without a checkpoint callback runs to
+    completion and returns the fully-hydrated state in one shot."""
+    _plant(tmp_path, "gc/A.iso", b"a")
+    state = LibraryState(roms={1: _make_rom(1, output_path="gc/A.iso", source_romm_md5=None)})
+    new_state, hydrated = hydrate_romm_md5(state, tmp_path)  # no on_checkpoint
+    assert hydrated == 1
+    assert new_state.roms[1].source_romm_md5 is not None
+
+
+def test_skipped_entries_dont_count_toward_checkpoint(tmp_path: Path) -> None:
+    """Entries skipped (missing on disk) shouldn't tick the checkpoint
+    counter — otherwise a state with many missing files would
+    thrash state.json with no actual progress to persist."""
+    # 1 real file, 4 missing — checkpoint_every=2 should fire ZERO times
+    # (only 1 entry actually hydrates; 1 < 2).
+    _plant(tmp_path, "gc/0.iso", b"real")
+    state = LibraryState(
+        roms={i: _make_rom(i, output_path=f"gc/{i}.iso", source_romm_md5=None) for i in range(5)}
+    )
+    checkpoints: list[int] = []
+    new_state, hydrated = hydrate_romm_md5(
+        state,
+        tmp_path,
+        on_checkpoint=lambda partial, count: checkpoints.append(count),
+        checkpoint_every=2,
+    )
+    assert hydrated == 1
+    assert checkpoints == []  # not enough successes to trigger a checkpoint
+
+
+# ---------------------------------------------------------------------------
+# Per-rom progress callback
+# ---------------------------------------------------------------------------
+
+
+def test_progress_fires_for_every_hydrated_rom(tmp_path: Path) -> None:
+    """`on_progress` fires once per successful hash, with the in-flight
+    state, the running count, and the rom that just completed."""
+    for i in range(3):
+        _plant(tmp_path, f"gc/{i}.iso", f"c-{i}".encode())
+    state = LibraryState(
+        roms={i: _make_rom(i, output_path=f"gc/{i}.iso", source_romm_md5=None) for i in range(3)}
+    )
+    events: list[tuple[int, int]] = []  # (count, rom_id)
+
+    def progress(partial: LibraryState, count: int, rom: RomState) -> None:
+        events.append((count, rom.rom_id))
+        # Each call sees a state where exactly `count` entries are populated.
+        populated = sum(1 for r in partial.roms.values() if r.source_romm_md5)
+        assert populated == count
+
+    hydrate_romm_md5(state, tmp_path, on_progress=progress)
+    assert [count for count, _ in events] == [1, 2, 3]
+    assert sorted(rom_id for _, rom_id in events) == [0, 1, 2]
+
+
+def test_progress_does_not_fire_for_skipped_entries(tmp_path: Path) -> None:
+    """Entries that are skipped (missing on disk) don't appear in the
+    progress stream — only successful hashes do."""
+    _plant(tmp_path, "gc/0.iso", b"real")
+    state = LibraryState(
+        roms={i: _make_rom(i, output_path=f"gc/{i}.iso", source_romm_md5=None) for i in range(3)}
+    )
+    events: list[int] = []
+    hydrate_romm_md5(
+        state,
+        tmp_path,
+        on_progress=lambda partial, count, rom: events.append(rom.rom_id),
+    )
+    assert events == [0]  # only the rom whose file exists
+
+
+def test_progress_and_checkpoint_can_run_together(tmp_path: Path) -> None:
+    """Both callbacks compose without interference. Progress fires per
+    rom; checkpoint fires every N — no conflict, no double-counting."""
+    for i in range(5):
+        _plant(tmp_path, f"gc/{i}.iso", f"c-{i}".encode())
+    state = LibraryState(
+        roms={i: _make_rom(i, output_path=f"gc/{i}.iso", source_romm_md5=None) for i in range(5)}
+    )
+    progress_events: list[int] = []
+    checkpoint_events: list[int] = []
+    hydrate_romm_md5(
+        state,
+        tmp_path,
+        on_progress=lambda partial, count, rom: progress_events.append(count),
+        on_checkpoint=lambda partial, count: checkpoint_events.append(count),
+        checkpoint_every=2,
+    )
+    assert progress_events == [1, 2, 3, 4, 5]  # one per rom
+    assert checkpoint_events == [2, 4]  # every other rom

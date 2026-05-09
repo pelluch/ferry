@@ -186,21 +186,37 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
             state_path = default_state_path()
             state = load_state(state_path)
             # Backfill `source_romm_md5` for legacy state entries (one-pass
-            # hash of local files). Persist immediately so a crash mid-run
-            # doesn't lose the work. No-op once every entry has it.
+            # hash of local files). Hydration checkpoints state.json
+            # every N entries so an interrupted run resumes cleanly
+            # rather than restarting from zero. No-op once every entry
+            # has it.
             if config.destination is not None:
                 pending = sum(1 for r in state.roms.values() if not r.source_romm_md5)
                 if pending:
                     click.echo(
                         f"hashing {pending} legacy state entr"
                         f"{'y' if pending == 1 else 'ies'} "
-                        "to populate source_romm_md5 (one-time; "
+                        "to populate source_romm_md5 (one-time, resumable; "
                         "can take several minutes for large libraries)…"
                     )
-                state, hydrated = hydrate_romm_md5(state, config.destination.roms_base)
-                if hydrated:
-                    click.echo(f"  ✓ hydrated {hydrated} entr{'y' if hydrated == 1 else 'ies'}")
-                    save_state(state, state_path)
+
+                    def _progress(partial: LibraryState, done: int, rom: RomState) -> None:
+                        click.echo(f"  [{done}/{pending}] {rom.name}")
+
+                    def _checkpoint(partial: LibraryState, done: int) -> None:
+                        save_state(partial, state_path)
+
+                    state, hydrated = hydrate_romm_md5(
+                        state,
+                        config.destination.roms_base,
+                        on_progress=_progress,
+                        on_checkpoint=_checkpoint,
+                    )
+                    if hydrated:
+                        click.echo(f"  ✓ hydrated {hydrated} entr{'y' if hydrated == 1 else 'ies'}")
+                        save_state(state, state_path)
+                else:
+                    state, _ = hydrate_romm_md5(state, config.destination.roms_base)
             trash_root = default_trash_root()
             plan = compute_plan(
                 current_roms=current_roms,
