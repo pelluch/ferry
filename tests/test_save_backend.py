@@ -966,10 +966,12 @@ def test_index_server_saves_orders_by_instant_not_lexically() -> None:
         "file_name": "later.srm",
         "updated_at": "2026-05-05T10:00:00Z",  # 10:00 UTC
     }
+    rom = _make_rom(rom_id=1, source_filename="Mario.zip")
     # Hand `earlier` to the indexer LAST so a buggy lexical max() picks it.
     indexed = index_server_saves(
         [later, earlier],
-        emulator_matches=lambda emu: emu.startswith("retroarch-"),
+        record_belongs=lambda r, emu: emu.startswith("retroarch-"),
+        lookup_rom={1: rom}.get,
         default_slot="default",
     )
     picked = indexed[(1, "retroarch-snes9x", "default")]
@@ -1087,3 +1089,215 @@ def test_is_empty_false_when_anything_happened() -> None:
     assert not SaveSyncResult(downloaded=1).is_empty
     assert not SaveSyncResult(failed=["x"]).is_empty
     assert not SaveSyncResult(ambiguous=["x"]).is_empty
+
+
+# ---------------------------------------------------------------------------
+# ck3 — predicate widening + transform hooks (`SaveBackendBase`)
+# ---------------------------------------------------------------------------
+
+
+def test_index_server_saves_skips_records_with_unknown_rom_id() -> None:
+    """Records whose rom isn't in our state get filtered at index time —
+    they were already getting dropped in the dispatch loop, just now
+    earlier and without invoking the predicate (which needs a rom)."""
+    rom_in_state = _make_rom(rom_id=1)
+    server_save_in_state = _server_save(save_id=10, rom_id=1)
+    server_save_orphan = _server_save(save_id=11, rom_id=999)
+    indexed = index_server_saves(
+        [server_save_in_state, server_save_orphan],
+        record_belongs=lambda r, emu: emu.startswith("retroarch"),
+        lookup_rom={1: rom_in_state}.get,
+        default_slot="default",
+    )
+    assert (1, "retroarch-snes9x", "default") in indexed
+    assert all(rom_id != 999 for rom_id, _, _ in indexed)
+
+
+def test_index_server_saves_predicate_can_filter_by_rom_platform() -> None:
+    """Demonstrates the widened predicate's value: two records with the
+    same emulator tag but different rom platforms; predicate routes
+    only one to this backend."""
+    gc_rom = _make_rom(rom_id=1, platform="ngc", source_filename="Pikmin.iso")
+    wii_rom = _make_rom(rom_id=2, platform="wii", source_filename="Galaxy.iso")
+    gc_save = _server_save(save_id=10, rom_id=1, emulator="dolphin", slot="game")
+    wii_save = _server_save(save_id=11, rom_id=2, emulator="dolphin", slot="default")
+
+    def gc_only(rom: RomState, emulator: str) -> bool:
+        return emulator == "dolphin" and rom.platform_slug == "ngc"
+
+    indexed = index_server_saves(
+        [gc_save, wii_save],
+        record_belongs=gc_only,
+        lookup_rom={1: gc_rom, 2: wii_rom}.get,
+        default_slot="default",
+    )
+    assert set(indexed) == {(1, "dolphin", "game")}
+
+
+@respx.mock
+def test_pre_upload_archive_hook_can_wrap_upload_path(tmp_path: Path) -> None:
+    """Subclass overrides `_pre_upload_archive` to substitute a different
+    path; observe `upload_save` POST receives the substituted path's bytes.
+    The default no-op is exercised by every other upload test in this
+    file — this just proves the hook plumbing fires."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    on_disk = saves_dir / "snes9x" / "Mario.srm"
+    on_disk.write_bytes(b"on-disk-bytes")
+    install = _make_install(saves_dir)
+    rom = _make_rom(rom_id=1)
+    state = _make_state([rom])
+
+    # Wrapped path lives outside the saves dir; the hook substitutes its
+    # bytes for what the upload sends.
+    transformed = tmp_path / "wrapped.bin"
+    transformed.write_bytes(b"wrapped-bytes")
+    saw_paths: list[Path] = []
+
+    import contextlib
+
+    class _WrappingBackend(RetroArchSaveBackend):
+        @contextlib.contextmanager
+        def _pre_upload_archive(self, rom, local):  # type: ignore[override]
+            saw_paths.append(local.local_path)
+            yield transformed
+
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
+    captured: dict = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json=_server_save(save_id=5, rom_id=1))
+
+    respx.post(f"{BASE_URL}/api/saves").mock(side_effect=_capture)
+
+    http = RommHttpAdapter(RommConfig(url=BASE_URL, api_key="rmm_x"))
+    api = RommApi(http)
+    backend = _WrappingBackend(install=install, api=api, device_id="dev-1")
+    with http:
+        result = backend.sync(state)
+
+    assert result.uploaded == 1
+    # Hook saw the on-disk LocalSave path
+    assert saw_paths == [on_disk]
+    # The HTTP body carries the wrapped bytes, not the on-disk bytes
+    assert b"wrapped-bytes" in captured["body"]
+    assert b"on-disk-bytes" not in captured["body"]
+
+
+@respx.mock
+def test_download_io_context_hook_can_substitute_download_target(tmp_path: Path) -> None:
+    """Subclass overrides `_download_io_context` to write bytes to a temp
+    location and finalize on exit. The default no-op writes directly to
+    final_dest — exercised by every other download test."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    install = _make_install(saves_dir)
+    rom = _make_rom(rom_id=1)
+    state = _make_state([rom])
+
+    import contextlib
+
+    finalized: list[tuple[Path, Path]] = []
+
+    class _StagingBackend(RetroArchSaveBackend):
+        @contextlib.contextmanager
+        def _download_io_context(self, rom, emulator, slot, save_filename, final_dest):  # type: ignore[override]
+            staging = tmp_path / "staging" / save_filename
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                yield staging
+            finally:
+                if staging.is_file():
+                    final_dest.parent.mkdir(parents=True, exist_ok=True)
+                    final_dest.write_bytes(staging.read_bytes())
+                    staging.unlink()
+                    finalized.append((staging, final_dest))
+
+    server = _server_save(save_id=5, rom_id=1, file_name="Mario.srm", md5=_md5(b"server-bytes"))
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[server]))
+    respx.get(f"{BASE_URL}/api/saves/5/content").mock(
+        return_value=httpx.Response(200, content=b"server-bytes")
+    )
+    respx.post(f"{BASE_URL}/api/saves/5/downloaded").mock(return_value=httpx.Response(204))
+
+    http = RommHttpAdapter(RommConfig(url=BASE_URL, api_key="rmm_x"))
+    api = RommApi(http)
+    backend = _StagingBackend(install=install, api=api, device_id="dev-1")
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1
+    # Bytes landed at the canonical RA path (final_dest), via the staging hop.
+    assert (saves_dir / "snes9x" / "Mario.srm").read_bytes() == b"server-bytes"
+    assert len(finalized) == 1
+    staged, final = finalized[0]
+    assert staged.name == "Mario.srm"
+    assert final == saves_dir / "snes9x" / "Mario.srm"
+
+
+@respx.mock
+def test_local_md5_default_uses_download_md5(tmp_path: Path) -> None:
+    """RA inherits the default — `last_sync_md5` = byte-md5 of the
+    response body, equal to `server.content_hash` for non-archive saves."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    install = _make_install(saves_dir)
+    rom = _make_rom(rom_id=1)
+    state = _make_state([rom])
+
+    body = b"server-bytes"
+    server = _server_save(save_id=5, rom_id=1, file_name="Mario.srm", md5=_md5(body))
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[server]))
+    respx.get(f"{BASE_URL}/api/saves/5/content").mock(
+        return_value=httpx.Response(200, content=body)
+    )
+    respx.post(f"{BASE_URL}/api/saves/5/downloaded").mock(return_value=httpx.Response(204))
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1
+    record = result.updated_roms[1].saves[0]
+    assert record.last_sync_md5 == _md5(body)
+
+
+@respx.mock
+def test_local_md5_hook_override_can_use_server_content_hash(tmp_path: Path) -> None:
+    """Wii's archetypal override: store `server.content_hash` instead of
+    `download.md5` so the next walker's manifest-hash compare succeeds.
+    Demonstrated here with a synthetic value to prove the hook plumbs
+    cleanly into `SaveRecord.last_sync_md5`."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    install = _make_install(saves_dir)
+    rom = _make_rom(rom_id=1)
+    state = _make_state([rom])
+
+    body = b"zip-like-bytes"
+    server_content_hash = "f" * 32  # synthetic; intentionally != md5(body)
+    server = _server_save(save_id=5, rom_id=1, file_name="Mario.srm", md5=server_content_hash)
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[server]))
+    respx.get(f"{BASE_URL}/api/saves/5/content").mock(
+        return_value=httpx.Response(200, content=body)
+    )
+    respx.post(f"{BASE_URL}/api/saves/5/downloaded").mock(return_value=httpx.Response(204))
+
+    class _ContentHashBackend(RetroArchSaveBackend):
+        def _local_md5_from_download(  # type: ignore[override]
+            self, *, download, server, rom, emulator, slot, final_dest
+        ):
+            ch = server.get("content_hash")
+            return ch if isinstance(ch, str) else download.md5
+
+    http = RommHttpAdapter(RommConfig(url=BASE_URL, api_key="rmm_x"))
+    api = RommApi(http)
+    backend = _ContentHashBackend(install=install, api=api, device_id="dev-1")
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1
+    record = result.updated_roms[1].saves[0]
+    assert record.last_sync_md5 == server_content_hash
+    assert record.last_sync_md5 != _md5(body)

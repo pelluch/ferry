@@ -1,4 +1,4 @@
-"""Tests for ferry.services.dolphin_save_backend.
+"""Tests for ferry.services.gamecube_save_backend.
 
 End-to-end exercises with respx-mocked RomM and a tmp_path filesystem.
 DolphinTool is mocked at the read_header layer so tests don't shell out.
@@ -19,7 +19,7 @@ from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DolphinTool
 from ferry.adapters.romm import RommApi, RommHttpAdapter
 from ferry.config import RommConfig
 from ferry.domain.state import LibraryState, RomState, SaveRecord, TransformedOutput
-from ferry.services.dolphin_save_backend import DolphinSaveBackend
+from ferry.services.gamecube_save_backend import GameCubeSaveBackend
 
 BASE_URL = "https://romm.example.tld"
 
@@ -124,10 +124,10 @@ def _make_backend(
     roms_base: Path,
     headers: dict[str, DiscHeader] | None = None,
     device_id: str = "dev-1",
-) -> tuple[DolphinSaveBackend, RommHttpAdapter]:
+) -> tuple[GameCubeSaveBackend, RommHttpAdapter]:
     http = RommHttpAdapter(RommConfig(url=BASE_URL, api_key="rmm_x"))
     api = RommApi(http)
-    backend = DolphinSaveBackend(
+    backend = GameCubeSaveBackend(
         install=install,
         api=api,
         device_id=device_id,
@@ -368,9 +368,13 @@ def test_sync_for_rom_skips_when_rom_not_in_state(tmp_path: Path) -> None:
 
 
 def test_index_dolphin_server_saves_filters_emulator() -> None:
-    """Direct unit check on the indexer with Dolphin's emulator predicate —
-    non-dolphin entries are dropped."""
+    """Direct unit check on the indexer with Dolphin's predicate —
+    non-dolphin entries and rom_ids missing from state are dropped."""
     from ferry.services.save_backend_base import index_server_saves
+
+    rom1 = _make_rom(1, output_path="gc/Game1.rvz")
+    rom2 = _make_rom(2, output_path="gc/Game2.rvz")
+    roms_by_id = {1: rom1, 2: rom2}
 
     saves = [
         _server_save(save_id=1, rom_id=1, emulator="dolphin", slot="A"),
@@ -378,7 +382,10 @@ def test_index_dolphin_server_saves_filters_emulator() -> None:
         _server_save(save_id=3, rom_id=2, emulator="dolphin", slot="B"),
     ]
     indexed = index_server_saves(
-        saves, emulator_matches=lambda e: e == "dolphin", default_slot="default"
+        saves,
+        record_belongs=lambda rom, e: e == "dolphin",
+        lookup_rom=roms_by_id.get,
+        default_slot="default",
     )
     assert set(indexed.keys()) == {(1, "dolphin", "A"), (2, "dolphin", "B")}
 

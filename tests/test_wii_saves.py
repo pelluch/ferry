@@ -1,6 +1,6 @@
 """Tests for `ferry.adapters.dolphin.wii_saves.list_local_saves`.
 
-Walker shape mirrors `test_dolphin_saves.py`: mocked `DolphinTool` for
+Walker shape mirrors `test_gamecube_saves.py`: mocked `DolphinTool` for
 header lookups, planted ROM bytes + save folders under tmp_path, and
 state assertions on the emitted LocalSave records.
 

@@ -156,6 +156,27 @@ class DolphinTool:
         return _parse_header_json(result.stdout)
 
 
+def lookup_disc_header(
+    rom_path: Path,
+    tool: DolphinTool,
+    cache: DiscHeaderCache | None,
+) -> DiscHeader | None:
+    """Cache-first header lookup. Populates the cache on a fresh read.
+
+    Shared by both the GameCube walker (gci filename → game_id) and the
+    Wii walker (NAND folder path → title_id). Callers expecting headers
+    for many ROMs should pass a shared cache so reads are reused.
+    """
+    if cache is not None:
+        cached = cache.get(rom_path)
+        if cached is not None:
+            return cached
+    header = tool.read_header(rom_path)
+    if header is not None and cache is not None:
+        cache.put(rom_path, header)
+    return header
+
+
 def _parse_header_json(raw: str) -> DiscHeader | None:
     """Parse dolphin-tool's `header -j` JSON output into a DiscHeader."""
     try:

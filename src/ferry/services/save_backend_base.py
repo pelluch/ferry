@@ -2,7 +2,7 @@
 
 Two concrete backends ship today:
   - `RetroArchSaveBackend` (v2): RetroArch SRAM `.srm` files.
-  - `DolphinSaveBackend` (v3): Dolphin GameCube GCI Folder `.gci` files.
+  - `GameCubeSaveBackend` (v3): Dolphin GameCube GCI Folder `.gci` files.
 
 Both share an identical sync algorithm — walk local, GET `/api/saves`,
 index by `(rom_id, emulator, slot)`, dispatch per-key via the shared
@@ -26,16 +26,18 @@ existing imports.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ferry.adapters.romm import RommApi, RommApiError, RommConflictError
+from ferry.adapters.romm.http import DownloadResult
 from ferry.domain.iso_time import now_iso, parse_iso_to_epoch
 from ferry.domain.save_conflicts import Classification, classify
 from ferry.domain.save_local import LocalSave
@@ -129,15 +131,21 @@ def strip_datetime_tag(filename: str) -> str:
 def index_server_saves(
     server_saves: Iterable[dict[str, Any]],
     *,
-    emulator_matches,
+    record_belongs: Callable[[RomState, str], bool],
+    lookup_rom: Callable[[int], RomState | None],
     default_slot: str,
 ) -> dict[tuple[int, str, str], dict[str, Any]]:
     """Group server saves by (rom_id, emulator, slot), filtered to one backend.
 
-    `emulator_matches(emulator: str) -> bool` decides which records this
-    backend owns. RomM may serve multiple history entries for the same
-    key (every upload appends `[datetime]` to the filename and creates a
-    new record); we keep only the most recent by `updated_at` per key.
+    `record_belongs(rom, emulator) -> bool` decides which records this
+    backend owns; takes the rom too so backends sharing an emulator tag
+    (Dolphin GC vs Wii — both `"dolphin"`) can disambiguate by platform.
+    `lookup_rom(rom_id) -> RomState | None` resolves a record's rom to
+    feed the predicate; records whose rom isn't in our state get dropped.
+
+    RomM may serve multiple history entries for the same key (every
+    upload appends `[datetime]` to the filename and creates a new
+    record); we keep only the most recent by `updated_at` per key.
 
     `default_slot` is what we fill in when a record's `slot` is missing
     or empty. RetroArch's SRAM convention is `"default"`; Dolphin always
@@ -151,7 +159,10 @@ def index_server_saves(
         slot = save.get("slot") or default_slot
         if not isinstance(rom_id, int) or not isinstance(emulator, str):
             continue  # malformed
-        if not emulator_matches(emulator):
+        rom = lookup_rom(rom_id)
+        if rom is None:
+            continue  # record's rom isn't in our state; another backend or removed locally
+        if not record_belongs(rom, emulator):
             continue  # belongs to another backend
         if not slot:
             continue  # empty slot after default fill — skip
@@ -182,14 +193,19 @@ def _updated_after(a: dict[str, Any], b: dict[str, Any]) -> bool:
 def index_prior_records(
     roms: Iterable[RomState],
     *,
-    emulator_matches,
+    record_belongs: Callable[[RomState, str], bool],
 ) -> dict[tuple[int, str, str], SaveRecord]:
-    """Index this backend's prior SaveRecords across all ROMs."""
+    """Index this backend's prior SaveRecords across all ROMs.
+
+    `record_belongs(rom, emulator)` filters by both rom and emulator so
+    Dolphin's GC and Wii backends can split a shared `"dolphin"` tag
+    by platform.
+    """
     return {
         (rom.rom_id, sr.emulator, sr.slot): sr
         for rom in roms
         for sr in rom.saves
-        if emulator_matches(sr.emulator)
+        if record_belongs(rom, sr.emulator)
     }
 
 
@@ -316,10 +332,13 @@ def merge_save_records(
 class SaveBackendBase(ABC):
     """Abstract base for save sync backends.
 
-    Concrete subclasses provide four hooks plus their own constructor.
-    The shared methods below handle the bulk of the per-key dispatch
-    loop, conflict resolution, server upload/download, and state
-    persistence.
+    Concrete subclasses provide four required hooks (`_walk_local`,
+    `_record_belongs_to_backend`, `_resolve_local_path`, `_saves_root`)
+    plus three optional transform hooks with no-op defaults
+    (`_pre_upload_archive`, `_download_io_context`,
+    `_local_md5_from_download`) — the latter let folder-saves backends
+    like Wii NAND interpose archive/extract steps without overriding
+    the dispatch loop.
 
     `default_slot` is the value the indexer fills in when a server
     record's `slot` field is missing — `"default"` for RetroArch SRAM,
@@ -349,8 +368,14 @@ class SaveBackendBase(ABC):
         """Walk this backend's saves tree and emit LocalSave records + warnings."""
 
     @abstractmethod
-    def _emulator_matches(self, emulator: str) -> bool:
-        """True iff *emulator* tag belongs to this backend."""
+    def _record_belongs_to_backend(self, rom: RomState, emulator: str) -> bool:
+        """True iff this `(rom, emulator)` pair is owned by this backend.
+
+        Takes both rom and emulator so backends sharing an emulator tag
+        (Dolphin GameCube vs Wii — both report `"dolphin"`) can split
+        records by `rom.platform_slug`. Predicates that only care about
+        the emulator string (RetroArch) just ignore the rom param.
+        """
 
     @abstractmethod
     def _resolve_local_path(
@@ -371,6 +396,75 @@ class SaveBackendBase(ABC):
     @abstractmethod
     def _saves_root(self) -> Path:
         """Trash relpath base — `delete_for_rom` writes to `<trash>/saves/<rel>`."""
+
+    # ------------------------------------------------------------------
+    # Optional transform hooks — pass-through defaults; override for
+    # backends whose on-wire format differs from on-disk shape (e.g. Wii
+    # NAND saves, which are folders bundled into a single zip per save).
+    # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _pre_upload_archive(self, rom: RomState, local: LocalSave) -> Iterator[Path]:
+        """Yield the path the upload should send. Default: pass-through.
+
+        Folder-saves backends override to materialize a transient archive
+        in a tmp dir on entry and clean up on exit. The yielded path is
+        what gets POSTed to RomM; `local.local_path` is what the walker
+        observed on disk (for Wii: the save folder).
+        """
+        yield local.local_path
+
+    @contextlib.contextmanager
+    def _download_io_context(
+        self,
+        rom: RomState,
+        emulator: str,
+        slot: str,
+        save_filename: str,
+        final_dest: Path,
+    ) -> Iterator[Path]:
+        """Yield the path bytes should be downloaded to.
+
+        Default: pass-through (the bytes land directly at `final_dest`).
+        Folder-saves backends override to yield a temp file path and,
+        on normal exit, transform that into `final_dest` (e.g. Wii
+        extracts the temp zip into the save folder). On exception the
+        manager cleans up; the caller treats the failure as a download
+        error.
+        """
+        yield final_dest
+
+    def _local_md5_from_download(
+        self,
+        *,
+        download: DownloadResult,
+        server: dict[str, Any],
+        rom: RomState,
+        emulator: str,
+        slot: str,
+        final_dest: Path,
+    ) -> str:
+        """Compute what to store in `SaveRecord.last_sync_md5`.
+
+        Default: `download.md5` — byte-md5 of the streamed response,
+        matching the local file's bytes for non-archive saves (RA SRAM,
+        GC GCI). Wii overrides to `server.content_hash` (RomM's manifest
+        hash for zips, equal to `folder_content_hash` of the extracted
+        folder by construction); falls back to `download.md5` if the
+        server didn't surface a content_hash.
+
+        Future simplification: once RomM ≥ the version that fixed
+        PUT-without-content_hash (memory: project_romm_481_hash_bug —
+        fixed post-2026-04-07 but unreleased at time of writing) is the
+        supported floor, this hook can be deleted. The base class can
+        then use `server.content_hash or download.md5` for all backends
+        — equivalent to today's `download.md5` for non-archives, and the
+        right manifest hash for zip-bundled saves. The hook exists today
+        only to keep `download.md5` as the safe fallback for RA/GC
+        during the 4.8.1 transition window where stale
+        `server.content_hash` could otherwise produce spurious uploads.
+        """
+        return download.md5
 
     # ------------------------------------------------------------------
     # delete_for_rom
@@ -445,24 +539,28 @@ class SaveBackendBase(ABC):
             prev_by_key = {
                 (rom_filter.rom_id, sr.emulator, sr.slot): sr
                 for sr in rom_filter.saves
-                if self._emulator_matches(sr.emulator)
+                if self._record_belongs_to_backend(rom_filter, sr.emulator)
             }
         else:
             local_saves, walker_warnings = self._walk_local(state)
             prev_by_key = index_prior_records(
-                state.roms.values(), emulator_matches=self._emulator_matches
+                state.roms.values(), record_belongs=self._record_belongs_to_backend
             )
         local_by_key = {(ls.rom_id, ls.emulator, ls.slot): ls for ls in local_saves}
         return local_by_key, prev_by_key, walker_warnings
 
     def _fetch_server_index(
-        self, rom_id: int | None = None
+        self,
+        state: LibraryState,
+        *,
+        rom_id: int | None = None,
     ) -> dict[tuple[int, str, str], dict[str, Any]]:
         """Fetch + index server saves. Raises RommApiError on fetch failure."""
         server_saves = self._api.list_saves(rom_id=rom_id, device_id=self._device_id or None)
         return index_server_saves(
             server_saves,
-            emulator_matches=self._emulator_matches,
+            record_belongs=self._record_belongs_to_backend,
+            lookup_rom=state.roms.get,
             default_slot=self.default_slot,
         )
 
@@ -511,7 +609,8 @@ class SaveBackendBase(ABC):
         local_by_key, prev_by_key, walker_warnings = self._walk_inputs(state, rom_filter=rom_filter)
         try:
             server_by_key = self._fetch_server_index(
-                rom_id=rom_filter.rom_id if rom_filter is not None else None
+                state,
+                rom_id=rom_filter.rom_id if rom_filter is not None else None,
             )
         except RommApiError as exc:
             return SaveSyncResult(
@@ -564,7 +663,7 @@ class SaveBackendBase(ABC):
         """
         local_by_key, prev_by_key, walker_warnings = self._walk_inputs(state)
         try:
-            server_by_key = self._fetch_server_index()
+            server_by_key = self._fetch_server_index(state)
         except RommApiError as exc:
             return SavePlan(
                 backend_label=self.backend_label,
@@ -770,14 +869,15 @@ class SaveBackendBase(ABC):
     ) -> SaveRecord | None:
         save_id = (server or {}).get("id") or (prev.server_save_id if prev else None)
         try:
-            response = self._api.upload_save(
-                rom.rom_id,
-                local.local_path,
-                emulator=local.emulator,
-                save_id=save_id,
-                device_id=self._device_id,
-                slot=local.slot,
-            )
+            with self._pre_upload_archive(rom, local) as upload_path:
+                response = self._api.upload_save(
+                    rom.rom_id,
+                    upload_path,
+                    emulator=local.emulator,
+                    save_id=save_id,
+                    device_id=self._device_id,
+                    slot=local.slot,
+                )
         except RommConflictError:
             # Server-as-arbiter: another device uploaded since this device's
             # last sync. Preserve the prior verbatim — next sync re-classifies
@@ -789,6 +889,12 @@ class SaveBackendBase(ABC):
             )
             return prev
         except RommApiError as exc:
+            result.failed.append(f"upload {rom.name} ({local.save_filename}): {exc}")
+            return prev
+        except OSError as exc:
+            # `_pre_upload_archive` may raise OSError while materializing a
+            # transient archive (Wii's zip-build, future folder backends).
+            # Mirrors RommApiError handling: surfaces as `failed`, prior preserved.
             result.failed.append(f"upload {rom.name} ({local.save_filename}): {exc}")
             return prev
         result.uploaded += 1
@@ -812,17 +918,20 @@ class SaveBackendBase(ABC):
             return None
 
         local_filename = strip_datetime_tag(server_filename)
-        dest = self._resolve_local_path(rom, emulator, slot, local_filename, result)
-        if dest is None:
+        final_dest = self._resolve_local_path(rom, emulator, slot, local_filename, result)
+        if final_dest is None:
             return None  # subclass wrote a `failed` entry into result
 
         try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            download = self._api.download_save(
-                save_id,
-                dest,
-                device_id=self._device_id,
-            )
+            with self._download_io_context(
+                rom, emulator, slot, local_filename, final_dest
+            ) as download_path:
+                download_path.parent.mkdir(parents=True, exist_ok=True)
+                download = self._api.download_save(
+                    save_id,
+                    download_path,
+                    device_id=self._device_id,
+                )
         except RommApiError as exc:
             result.failed.append(f"download {rom.name} ({local_filename}): {exc}")
             return None
@@ -846,12 +955,20 @@ class SaveBackendBase(ABC):
             )
             return None
 
+        last_sync_md5 = self._local_md5_from_download(
+            download=download,
+            server=server,
+            rom=rom,
+            emulator=emulator,
+            slot=slot,
+            final_dest=final_dest,
+        )
         result.downloaded += 1
         return SaveRecord(
             emulator=emulator,
             slot=slot,
             save_filename=local_filename,
-            last_sync_md5=download.md5,
+            last_sync_md5=last_sync_md5,
             last_sync_server_size=server.get("file_size_bytes") or download.size,
             last_sync_server_updated_at=server.get("updated_at") or "",
             last_synced_at=now_iso(),

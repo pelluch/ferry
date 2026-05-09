@@ -30,15 +30,17 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall, RegionEncoding
-from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
+from ferry.adapters.dolphin.dolphin_tool import (
+    DiscHeaderCache,
+    DolphinTool,
+    lookup_disc_header,
+)
 from ferry.domain.hashing import md5_file
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.save_local import LocalSave
 from ferry.domain.state import RomState
 
-# Re-export so existing `from ferry.adapters.dolphin.dolphin_saves import LocalSave`
-# imports keep working. The canonical home is `ferry.domain.save_local`.
-__all__ = ("LocalSave", "list_local_saves", "lookup_disc_header", "resolve_save_path")
+__all__ = ("LocalSave", "list_local_saves", "resolve_save_path")
 
 logger = logging.getLogger(__name__)
 
@@ -150,28 +152,6 @@ def _gamecube_roms(roms: Iterable[RomState]) -> list[RomState]:
     return [
         rom for rom in roms if resolve_platform_dir(rom.platform_slug) == _GAMECUBE_PLATFORM_DIR
     ]
-
-
-def lookup_disc_header(
-    rom_path: Path,
-    tool: DolphinTool,
-    cache: DiscHeaderCache | None,
-) -> DiscHeader | None:
-    """Cache-first header lookup. Populates the cache on a fresh read.
-
-    Used by the walker (this module) and the save backend (which needs
-    the disc header again to resolve download destinations). Callers
-    expecting headers for many ROMs should pass a shared cache so the
-    walker's reads are reused.
-    """
-    if cache is not None:
-        cached = cache.get(rom_path)
-        if cached is not None:
-            return cached
-    header = tool.read_header(rom_path)
-    if header is not None and cache is not None:
-        cache.put(rom_path, header)
-    return header
 
 
 def _region_folder(region: str, encoding: RegionEncoding) -> str | None:

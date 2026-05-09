@@ -2,15 +2,17 @@
 
 Subclass of `SaveBackendBase` (`services/save_backend_base.py`) — the
 shared sync/plan/delete machinery lives there. This module supplies
-Dolphin-specific glue:
+GameCube-specific glue:
 
-- `DolphinSaveBackend` — the four hook methods plus disc-header
-  resolution for download path computation.
+- `GameCubeSaveBackend` — the hook methods plus disc-header resolution
+  for download path computation.
 
-The walker (`adapters.dolphin_saves.list_local_saves`) and the
-disc-header adapter (`adapters.dolphin_tool`) handle the
-Dolphin-specific I/O; this class just wires them into the base's
-sync loop and adds the region-folder mapping for downloads.
+The walker (`adapters.dolphin.gamecube_saves.list_local_saves`) and the
+disc-header adapter (`adapters.dolphin.dolphin_tool`) handle the
+Dolphin-specific I/O; this class just wires them into the base's sync
+loop, filters records to GC-platform ROMs (the `dolphin` emulator tag
+is shared with Wii — `_record_belongs_to_backend` disambiguates by
+`rom.platform_slug`), and adds the region-folder mapping for downloads.
 """
 
 from __future__ import annotations
@@ -19,22 +21,27 @@ import logging
 from pathlib import Path
 
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall
-from ferry.adapters.dolphin.dolphin_saves import (
-    list_local_saves,
+from ferry.adapters.dolphin.dolphin_tool import (
+    DiscHeader,
+    DiscHeaderCache,
+    DolphinTool,
     lookup_disc_header,
-    resolve_save_path,
 )
-from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
+from ferry.adapters.dolphin.gamecube_saves import list_local_saves, resolve_save_path
 from ferry.adapters.romm import RommApi
+from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.save_local import LocalSave
 from ferry.domain.state import LibraryState, RomState
 from ferry.services.save_backend import SaveSyncResult
 from ferry.services.save_backend_base import SaveBackendBase
 
+_GAMECUBE_PLATFORM_DIR = "gc"
+_DOLPHIN_EMULATOR_LABEL = "dolphin"
+
 logger = logging.getLogger(__name__)
 
 
-class DolphinSaveBackend(SaveBackendBase):
+class GameCubeSaveBackend(SaveBackendBase):
     """Sync standalone-Dolphin's GCI Folder saves with RomM's `/api/saves`."""
 
     backend_label = "Dolphin"
@@ -70,8 +77,14 @@ class DolphinSaveBackend(SaveBackendBase):
             cache=self._cache,
         )
 
-    def _emulator_matches(self, emulator: str) -> bool:
-        return emulator == "dolphin"
+    def _record_belongs_to_backend(self, rom: RomState, emulator: str) -> bool:
+        # The `dolphin` emulator tag is shared with the Wii backend;
+        # disambiguate by platform so Wii server records don't get
+        # routed into the GC walker / path resolver.
+        return (
+            emulator == _DOLPHIN_EMULATOR_LABEL
+            and resolve_platform_dir(rom.platform_slug) == _GAMECUBE_PLATFORM_DIR
+        )
 
     def _saves_root(self) -> Path:
         return self._install.saves_root

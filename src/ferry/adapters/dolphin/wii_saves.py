@@ -29,8 +29,12 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall
-from ferry.adapters.dolphin.dolphin_saves import lookup_disc_header
-from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
+from ferry.adapters.dolphin.dolphin_tool import (
+    DiscHeader,
+    DiscHeaderCache,
+    DolphinTool,
+    lookup_disc_header,
+)
 from ferry.adapters.dolphin.wii_archive import (
     folder_content_hash,
     is_save_path_ignored,

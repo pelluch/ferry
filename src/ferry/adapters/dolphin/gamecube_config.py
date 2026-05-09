@@ -1,4 +1,9 @@
-"""Parse Dolphin's `Dolphin.ini` for memcard-mode-related settings.
+"""Parse `Dolphin.ini` for GameCube memcard-mode settings.
+
+GC-specific: the only keys read here describe Slot A / Slot B EXI memcard
+configuration, which doesn't apply to Wii (NAND saves don't go through
+the EXI memcard path). Wii config parsing — should we ever need it — would
+land in a sibling `wii_config.py`.
 
 `Dolphin.ini` is a Qt-style INI: `[Section]` headers + `key = value` lines,
 case-sensitive section names. ferry only needs two keys from `[Core]`:
@@ -46,7 +51,7 @@ MemcardMode = Literal["gci_folder", "raw_memcard", "none", "other"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class DolphinSettings:
+class GameCubeMemcardSettings:
     """Memcard-related settings parsed out of a single `Dolphin.ini`.
 
     `slot_a_raw` / `slot_b_raw` are the integer enum values as written
@@ -69,7 +74,7 @@ class DolphinSettings:
         return _classify(self.slot_b_raw)
 
 
-def parse_dolphin_ini(config_path: Path) -> DolphinSettings | None:
+def parse_gamecube_memcard_settings(config_path: Path) -> GameCubeMemcardSettings | None:
     """Return memcard settings from `Dolphin.ini`, or None if it doesn't exist.
 
     Missing/unreadable INI returns None; the caller treats that as "this
@@ -109,7 +114,7 @@ def parse_dolphin_ini(config_path: Path) -> DolphinSettings | None:
             if parsed is not None:
                 slot_b = parsed
 
-    return DolphinSettings(config_path=config_path, slot_a_raw=slot_a, slot_b_raw=slot_b)
+    return GameCubeMemcardSettings(config_path=config_path, slot_a_raw=slot_a, slot_b_raw=slot_b)
 
 
 def _parse_int(raw: str) -> int | None:

@@ -25,9 +25,7 @@ from __future__ import annotations
 
 import logging
 import socket
-from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
 
 from ferry import __version__
 from ferry.adapters.retroarch.retroarch_core_info import CoreInfoIndex
@@ -40,8 +38,6 @@ from ferry.services.save_backend_base import (
     SaveBackend,
     SaveBackendBase,
     SaveSyncResult,
-    index_prior_records,
-    index_server_saves,
 )
 
 # Re-export so existing `from ferry.services.save_backend import ...` keeps
@@ -126,7 +122,12 @@ class RetroArchSaveBackend(SaveBackendBase):
     def _walk_local(self, state: LibraryState) -> tuple[list[LocalSave], list[str]]:
         return list_local_saves(self._install, state.roms.values(), core_info=self._core_info)
 
-    def _emulator_matches(self, emulator: str) -> bool:
+    def _record_belongs_to_backend(self, rom: RomState, emulator: str) -> bool:
+        # RA's emulator tag carries enough disambiguation on its own
+        # (`retroarch`, `retroarch-snes9x`, etc.) — the rom param is
+        # unused but required by the base class signature so backends
+        # like Dolphin can split a shared tag by platform.
+        del rom  # unused
         return emulator.startswith("retroarch")
 
     def _saves_root(self) -> Path:
@@ -189,32 +190,3 @@ def _resolve_local_path_for(
     if sort_by_content and not sort_by_core:
         return base / rom.platform_slug / save_filename
     return base / save_filename
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat re-exports for tests / downstream imports
-# ---------------------------------------------------------------------------
-# The indexer functions used to live in this module under private names; tests
-# and adjacent code import them from here. The implementations now live in
-# `save_backend_base` (parameterized by emulator predicate); preserve the old
-# names with retroarch-specific predicates baked in.
-
-
-def _index_server_saves(
-    server_saves: Iterable[dict[str, Any]],
-) -> dict[tuple[int, str, str], dict[str, Any]]:
-    return index_server_saves(
-        server_saves,
-        emulator_matches=lambda e: e.startswith("retroarch"),
-        default_slot="default",
-    )
-
-
-def _index_prior_records(
-    roms: Iterable[RomState],
-) -> dict[tuple[int, str, str], RomState]:
-    # Type return is dict[..., SaveRecord] in practice; preserved for
-    # call-site compatibility with the old private name.
-    return index_prior_records(  # type: ignore[return-value]
-        roms, emulator_matches=lambda e: e.startswith("retroarch")
-    )

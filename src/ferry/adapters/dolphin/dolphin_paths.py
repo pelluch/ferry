@@ -39,10 +39,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ferry.adapters.dolphin.dolphin_config import (
-    DolphinSettings,
+from ferry.adapters.dolphin.gamecube_config import (
+    GameCubeMemcardSettings,
     MemcardMode,
-    parse_dolphin_ini,
+    parse_gamecube_memcard_settings,
 )
 from ferry.domain.install_selection import select_active
 
@@ -125,7 +125,7 @@ class DolphinInstall:
     saves_root: Path
     config_path: Path
     region_encoding: RegionEncoding
-    settings: DolphinSettings | None
+    settings: GameCubeMemcardSettings | None
     has_saves: bool
     wii_saves_root: Path | None = None
 
@@ -167,7 +167,7 @@ def discover_dolphin_installs(home: Path | None = None) -> list[DolphinInstall]:
                 saves_root=saves_root,
                 config_path=config_path,
                 region_encoding=profile.region_encoding,
-                settings=parse_dolphin_ini(config_path),
+                settings=parse_gamecube_memcard_settings(config_path),
                 has_saves=_has_gci_files(saves_root),
                 wii_saves_root=wii_saves_root,
             )

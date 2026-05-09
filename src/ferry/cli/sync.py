@@ -48,7 +48,7 @@ from ferry.domain.sync_plan import (
     UpdateAction,
     compute_plan,
 )
-from ferry.services.dolphin_save_backend import DolphinSaveBackend
+from ferry.services.gamecube_save_backend import GameCubeSaveBackend
 from ferry.services.launch_hooks import (
     default_snapshot_path,
     detect_drift,
@@ -469,7 +469,7 @@ def _preview_dolphin(
     if config.destination is None:
         return  # caller-side guard; defensive
     cache = DiscHeaderCache(default_cache_path())
-    backend = DolphinSaveBackend(
+    backend = GameCubeSaveBackend(
         install=install,
         api=api,
         device_id=device_id or "",
@@ -720,8 +720,8 @@ def _build_dolphin_backend(
     config: Config,
     api: RommApi,
     device_id: str,
-) -> DolphinSaveBackend | None:
-    """Construct a DolphinSaveBackend, or skip with a message if dolphin-tool
+) -> GameCubeSaveBackend | None:
+    """Construct a GameCubeSaveBackend, or skip with a message if dolphin-tool
     or roms_base aren't available."""
     if config.destination is None:
         return None  # caller guard checked this; defensive
@@ -735,7 +735,7 @@ def _build_dolphin_backend(
         )
         return None
     cache = DiscHeaderCache(default_cache_path())
-    return DolphinSaveBackend(
+    return GameCubeSaveBackend(
         install=install,
         api=api,
         device_id=device_id,
