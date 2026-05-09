@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 class GameCubeSaveBackend(SaveBackendBase):
     """Sync standalone-Dolphin's GCI Folder saves with RomM's `/api/saves`."""
 
-    backend_label = "Dolphin"
+    backend_label = "Dolphin (GameCube)"
     default_slot = "default"  # unused: Dolphin always sets a real slot
 
     def __init__(
