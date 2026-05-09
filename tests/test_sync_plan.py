@@ -54,6 +54,40 @@ def test_unchanged_when_updated_at_matches(make_rom) -> None:
     assert plan.to_delete == []
 
 
+def test_unchanged_when_updated_at_format_differs_but_instant_matches(make_rom) -> None:
+    """Regression: state stores `+00:00` form, API returns `Z` form for
+    the same instant. Lexical compare would flag every ROM in state as
+    needing update; instant-aware compare correctly says unchanged.
+
+    Reproduces the live-test bug observed on 2026-05-08 where the user's
+    state had `2026-04-28T12:14:09+00:00` but `compute_plan` flagged 510
+    ROMs for update.
+    """
+    state = LibraryState(
+        roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00+00:00")}
+    )
+    plan = compute_plan(
+        current_roms=[romm_rom(1, updated_at="2026-04-25T12:00:00Z")],
+        state=state,
+    )
+    assert plan.unchanged_count == 1
+    assert plan.to_update == []
+
+
+def test_unchanged_when_microseconds_truncated(make_rom) -> None:
+    """RomM's list endpoint truncates microseconds while POST/PUT
+    responses preserve them. Same instant; should be unchanged."""
+    state = LibraryState(
+        roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00.123456+00:00")}
+    )
+    plan = compute_plan(
+        current_roms=[romm_rom(1, updated_at="2026-04-25T12:00:00+00:00")],
+        state=state,
+    )
+    assert plan.unchanged_count == 1
+    assert plan.to_update == []
+
+
 def test_update_when_updated_at_differs(make_rom) -> None:
     state = LibraryState(roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00Z")})
     plan = compute_plan(

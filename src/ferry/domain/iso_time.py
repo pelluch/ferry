@@ -50,3 +50,27 @@ def now_iso() -> str:
     `parse_iso`.
     """
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def same_iso_instant(a: str | None, b: str | None) -> bool:
+    """True iff *a* and *b* represent the same ISO-8601 instant (second precision).
+
+    Use this — not lexical string compare — for "did this timestamp
+    change?" checks. RomM's serialization isn't stable across endpoints:
+    the rom-list endpoint truncates to seconds (`...T12:14:09+00:00`),
+    while save POST/PUT responses keep microseconds
+    (`...T12:14:09.123456+00:00`); the same instant via different
+    serializations would otherwise compare unequal and cause spurious
+    "to update" / "to upload" flags on every sync.
+
+    Falls back to lexical equality when either string is unparseable —
+    equivalent strings stay equivalent regardless of parse support, so
+    None==None and ""=="" still report True.
+    """
+    if a == b:
+        return True
+    dt_a = parse_iso(a)
+    dt_b = parse_iso(b)
+    if dt_a is None or dt_b is None:
+        return False
+    return dt_a.replace(microsecond=0) == dt_b.replace(microsecond=0)

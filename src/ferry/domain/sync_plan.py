@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ferry.domain.destination import Destination
+from ferry.domain.iso_time import same_iso_instant
 from ferry.domain.state import LibraryState, RomState
 
 
@@ -126,7 +127,7 @@ def compute_plan(
             continue
 
         current_updated_at = rom.get("updated_at")
-        if current_updated_at != prev.source_updated_at:
+        if not same_iso_instant(current_updated_at, prev.source_updated_at):
             to_update.append(
                 UpdateAction(
                     rom_id=rom_id,

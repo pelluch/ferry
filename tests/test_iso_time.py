@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 
-from ferry.domain.iso_time import parse_iso, parse_iso_to_epoch
+from ferry.domain.iso_time import parse_iso, parse_iso_to_epoch, same_iso_instant
 
 # ---------------------------------------------------------------------------
 # parse_iso
@@ -111,3 +111,62 @@ def test_or_zero_pattern_sorts_unparseable_to_bottom() -> None:
     valid = parse_iso_to_epoch("2026-05-05T10:00:00Z") or 0.0
     invalid = parse_iso_to_epoch("garbage") or 0.0
     assert valid > invalid
+
+
+# ---------------------------------------------------------------------------
+# same_iso_instant
+# ---------------------------------------------------------------------------
+
+
+def test_same_instant_when_strings_match() -> None:
+    """Identical strings short-circuit to True without parsing."""
+    assert same_iso_instant("2026-05-05T10:00:00Z", "2026-05-05T10:00:00Z")
+
+
+def test_same_instant_z_vs_offset_form() -> None:
+    """Regression for the live-test bug: state stored `+00:00` while
+    a later API response returned `Z` for the same instant — `compute_plan`
+    would lexically mismatch and flag every ROM for update."""
+    assert same_iso_instant("2026-04-28T12:14:09+00:00", "2026-04-28T12:14:09Z")
+
+
+def test_same_instant_microseconds_truncated() -> None:
+    """RomM's list endpoint truncates microseconds while POST/PUT
+    responses keep them; both forms are the same instant at second
+    precision."""
+    assert same_iso_instant("2026-05-05T10:21:07.058332+00:00", "2026-05-05T10:21:07+00:00")
+
+
+def test_same_instant_across_offsets() -> None:
+    """Same UTC instant in two different timezone offsets."""
+    assert same_iso_instant("2026-05-05T10:00:00Z", "2026-05-05T12:00:00+02:00")
+
+
+def test_different_instants_compare_unequal() -> None:
+    assert not same_iso_instant("2026-05-05T10:00:00Z", "2026-05-05T10:00:01Z")
+
+
+def test_both_none_compare_equal() -> None:
+    """`None == None` short-circuits before parsing."""
+    assert same_iso_instant(None, None)
+
+
+def test_both_empty_strings_compare_equal() -> None:
+    assert same_iso_instant("", "")
+
+
+def test_one_none_one_set_compare_unequal() -> None:
+    assert not same_iso_instant(None, "2026-05-05T10:00:00Z")
+    assert not same_iso_instant("2026-05-05T10:00:00Z", None)
+
+
+def test_one_unparseable_compares_unequal() -> None:
+    """When one side is garbage, fall back to lexical inequality."""
+    assert not same_iso_instant("garbage", "2026-05-05T10:00:00Z")
+    assert not same_iso_instant("2026-05-05T10:00:00Z", "garbage")
+
+
+def test_both_unparseable_but_equal_strings_compare_equal() -> None:
+    """Equivalent strings stay equivalent even when neither parses
+    — the lexical fast-path covers this before parse is attempted."""
+    assert same_iso_instant("garbage", "garbage")
