@@ -15,7 +15,7 @@ def romm_rom(
     fs_size_bytes: int = 1024,
     md5_hash: str | None = "11111111111111111111111111111111",
 ) -> dict:
-    """Default `md5_hash` matches the `source_romm_md5` baked into
+    """Default `md5_hash` matches the `source_md5` baked into
     `conftest.make_rom`, so a state-rom paired with an API-rom by
     rom_id classifies as unchanged unless a test overrides one side."""
     return {
@@ -78,7 +78,7 @@ def test_unchanged_when_only_updated_at_drifted_but_md5_matches(make_rom) -> Non
 
 def test_update_when_romm_md5_differs(make_rom) -> None:
     """Different md5 ⇒ real file change ⇒ to_update."""
-    state = LibraryState(roms={1: make_rom(rom_id=1)})  # source_romm_md5 default 11..
+    state = LibraryState(roms={1: make_rom(rom_id=1)})  # source_md5 default 11..
     plan = compute_plan(
         current_roms=[romm_rom(1, md5_hash="2" * 32)],
         state=state,
@@ -89,23 +89,51 @@ def test_update_when_romm_md5_differs(make_rom) -> None:
     assert "md5 changed" in plan.to_update[0].reason
 
 
-def test_update_when_state_lacks_romm_md5(make_rom) -> None:
-    """Legacy state entry (pre-`source_romm_md5` schema) → flag for
-    re-sync. Hydration normally backfills this before compute_plan
-    runs; this branch is the failsafe for hydration-skipped entries
-    (file missing on disk, hash compute failed)."""
-    state = LibraryState(roms={1: make_rom(rom_id=1, source_romm_md5=None)})
-    plan = compute_plan(current_roms=[romm_rom(1)], state=state)
-    assert len(plan.to_update) == 1
-    assert "no stored RomM-style md5" in plan.to_update[0].reason
+def test_unchanged_when_md5_missing_but_size_matches(make_rom) -> None:
+    """Tier-2 fallback: state lacks md5 (legacy) and/or server omits
+    md5_hash (RomM hashing disabled), but `fs_size_bytes` matches
+    `state.source_size` → size fallback says unchanged."""
+    state = LibraryState(roms={1: make_rom(rom_id=1, source_md5=None, source_size=1024)})
+    plan = compute_plan(
+        current_roms=[romm_rom(1, fs_size_bytes=1024)],  # md5 default works too
+        state=state,
+    )
+    assert plan.unchanged_count == 1
+    assert plan.to_update == []
 
 
-def test_update_when_server_omits_md5_hash(make_rom) -> None:
-    """API rom-row missing `md5_hash` → conservative re-sync."""
-    state = LibraryState(roms={1: make_rom(rom_id=1)})
-    plan = compute_plan(current_roms=[romm_rom(1, md5_hash=None)], state=state)
+def test_unchanged_when_server_omits_md5_but_size_matches(make_rom) -> None:
+    """Same fallback from the other side: state has md5, RomM has
+    hashing disabled (md5_hash=None) — size still matches, unchanged."""
+    state = LibraryState(roms={1: make_rom(rom_id=1, source_size=1024)})
+    plan = compute_plan(
+        current_roms=[romm_rom(1, md5_hash=None, fs_size_bytes=1024)],
+        state=state,
+    )
+    assert plan.unchanged_count == 1
+    assert plan.to_update == []
+
+
+def test_update_via_size_fallback_when_md5_missing(make_rom) -> None:
+    """md5 unavailable on either side AND size differs → real change."""
+    state = LibraryState(roms={1: make_rom(rom_id=1, source_md5=None, source_size=1024)})
+    plan = compute_plan(
+        current_roms=[romm_rom(1, fs_size_bytes=2048)],
+        state=state,
+    )
     assert len(plan.to_update) == 1
-    assert "did not surface md5_hash" in plan.to_update[0].reason
+    assert "fs_size_bytes changed" in plan.to_update[0].reason
+    assert "md5 unavailable" in plan.to_update[0].reason
+
+
+def test_update_when_no_comparable_signal(make_rom) -> None:
+    """Tier-3 fallback: no md5 on either side AND no size info → conservative re-sync."""
+    state = LibraryState(roms={1: make_rom(rom_id=1, source_md5=None, source_size=0)})
+    rom = romm_rom(1, md5_hash=None)
+    rom.pop("fs_size_bytes", None)  # both sides missing size
+    plan = compute_plan(current_roms=[rom], state=state)
+    assert len(plan.to_update) == 1
+    assert "no comparable signal" in plan.to_update[0].reason
 
 
 def test_planner_always_populates_to_delete(make_rom) -> None:
@@ -123,7 +151,7 @@ def test_mixed_plan(make_rom) -> None:
     state = LibraryState(
         roms={
             1: make_rom(rom_id=1),  # unchanged (md5 matches default)
-            2: make_rom(rom_id=2, source_romm_md5="aaaa" * 8),  # to update (md5 differs)
+            2: make_rom(rom_id=2, source_md5="aaaa" * 8),  # to update (md5 differs)
             3: make_rom(rom_id=3, name="Removed"),  # to delete
         }
     )

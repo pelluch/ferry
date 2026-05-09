@@ -81,17 +81,16 @@ class RomState:
 
     # Source provenance — what RomM had when we last fetched.
     source_filename: str
-    source_md5: str  # md5 of the bytes we received from RomM (the as-served file)
+    # md5 computed via RomM's algorithm — `largest-inner-file` for
+    # zip/tar/gz/bz2/7z archives, direct md5 for non-archives. Equality
+    # with `rom.md5_hash` from the API ⇒ unchanged content (see
+    # `compute_plan._content_changed`). None for legacy entries (before
+    # this field's semantics changed) and for installs whose RomM
+    # has hash computation disabled. `compute_plan` falls back to
+    # `source_size` comparison in those cases.
+    source_md5: str | None = None
     source_size: int
     source_updated_at: str  # ISO 8601 from RomM
-    # md5 computed via RomM's algorithm — `largest-inner-file` for
-    # zip/tar/gz/bz2/7z archives, direct md5 for non-archives. Used by
-    # `compute_plan` as the deterministic "did the file actually change?"
-    # signal: equality with `rom.md5_hash` from the API ⇒ unchanged,
-    # regardless of whether RomM's row-level `updated_at` drifted from a
-    # metadata refresh. None for legacy state entries written before
-    # this field existed; lazy hydration backfills on first sync.
-    source_romm_md5: str | None = None
 
     # Transform pipeline applied to the source file.
     transforms: tuple[str, ...]
@@ -224,7 +223,6 @@ def _rom_from_dict(raw: dict[str, Any]) -> RomState:
         "platform_slug",
         "name",
         "source_filename",
-        "source_md5",
         "source_updated_at",
         "synced_at",
     )
@@ -255,24 +253,28 @@ def _rom_from_dict(raw: dict[str, Any]) -> RomState:
         raise StateDecodeError("rom.saves must be a list (or omitted)")
     saves = tuple(_save_record_from_dict(s) for s in saves_raw)
 
-    # `source_romm_md5` is optional — legacy state files written before
-    # the field existed pass through with None and get backfilled by
-    # lazy hydration on first sync. Empty string is normalized to None
-    # so a partial write doesn't get mistaken for a populated value.
-    romm_md5_raw = raw.get("source_romm_md5")
-    if romm_md5_raw is not None and not isinstance(romm_md5_raw, str):
-        raise StateDecodeError("rom.source_romm_md5 must be a string or null")
-    source_romm_md5 = romm_md5_raw if romm_md5_raw else None
+    # `source_md5` is optional. Empty string is normalized to None so a
+    # partial write doesn't get mistaken for a populated value. Legacy
+    # state files (pre-2026-05) carried a different `source_md5`
+    # semantic — byte-md5 of the file as served by RomM rather than
+    # RomM's content-hash algorithm — and won't compare correctly
+    # against `rom.md5_hash`. The user is expected to drop those values
+    # from state.json (one-line sed) before the first sync after the
+    # rename; otherwise compute_plan's tiered fallback flags them all
+    # for re-sync via the size compare.
+    md5_raw = raw.get("source_md5")
+    if md5_raw is not None and not isinstance(md5_raw, str):
+        raise StateDecodeError("rom.source_md5 must be a string or null")
+    source_md5 = md5_raw if md5_raw else None
 
     return RomState(
         rom_id=raw["rom_id"],
         platform_slug=raw["platform_slug"],
         name=raw["name"],
         source_filename=raw["source_filename"],
-        source_md5=raw["source_md5"],
+        source_md5=source_md5,
         source_size=raw["source_size"],
         source_updated_at=raw["source_updated_at"],
-        source_romm_md5=source_romm_md5,
         transforms=tuple(transforms_raw),
         outputs=outputs,
         primary_output_index=primary,

@@ -320,18 +320,18 @@ def _execute_one(
         # direct md5 for non-archives). Stored as the deterministic
         # change-detection signal `compute_plan` compares against
         # `rom.md5_hash` from the API. Non-load-bearing if it fails
-        # (returns None) — next sync will re-flag for update.
-        source_romm_md5 = hash_orphan_file(source_path)
+        # (returns None) — next sync will fall back to size compare
+        # via the planner's tiered fallback.
+        source_md5 = hash_orphan_file(source_path)
 
         new_state = RomState(
             rom_id=rom_id,
             platform_slug=platform,
             name=action.name,
             source_filename=local_filename,
-            source_md5=download_result.md5,
+            source_md5=source_md5,
             source_size=download_result.size,
             source_updated_at=str(rom_data.get("updated_at", "")),
-            source_romm_md5=source_romm_md5,
             transforms=tuple(transforms_cfg.for_platform(platform)),
             outputs=outputs,
             primary_output_index=primary_index,

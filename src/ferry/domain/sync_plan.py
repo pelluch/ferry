@@ -7,11 +7,20 @@ Consumers of the resulting plan are:
 - the delete-on-remove path → executes `to_delete`
 - `ferry sync --dry-run` → prints the plan and exits
 
-Change detection compares `state.source_romm_md5` (a md5 computed via
-RomM's `largest-inner-file-for-archives` algorithm, populated by the
-download path or by lazy hydration over local files) against the
-server's `rom.md5_hash`. RomM's row-level `updated_at` is unreliable —
-its scan path bumps `updated_at` on every rescan when refreshing
+Change detection is tiered:
+
+1. **md5 compare** when both sides have a hash — `state.source_md5`
+   (computed via RomM's `largest-inner-file-for-archives` algorithm
+   on download) against the server's `rom.md5_hash`. Deterministic.
+2. **fs_size_bytes compare** when md5 isn't available on either side
+   (RomM has hash computation disabled, or this is a legacy state
+   entry). Same size = almost-certainly same file; different = real
+   change. Same-size-different-content replacement slips through
+   (rare).
+3. **Conservative re-sync** when neither md5 nor size are available.
+
+RomM's row-level `updated_at` is intentionally NOT used — its scan
+path bumps `updated_at` on every rescan when refreshing
 cover/screenshot/manual asset paths even when the underlying file is
 identical, which would otherwise trigger a full re-download of the
 library on every metadata refresh.
@@ -192,36 +201,37 @@ def _primary_missing(prev: RomState, destination: Destination) -> bool:
 
 
 def _content_changed(rom: dict[str, Any], prev: RomState) -> bool:
-    """True iff the API rom-row's RomM-style md5 differs from stored state.
+    """Tiered change detection — see module docstring for the full table.
 
-    Both sides use RomM's `largest-inner-file-for-archives` md5 algorithm
-    (see `adapters/orphan_hash.hash_orphan_file` for ferry's mirror).
-    Equality ⇒ same file content; we skip re-download regardless of any
-    `updated_at` drift.
-
-    Conservative branches when we can't make a clean equality call:
-      - state lacks `source_romm_md5` (legacy entries before lazy
-        hydration ran, or hydration failed because the file was missing)
-        → flag for update; the re-download populates the field for next
-        sync.
-      - server omits `md5_hash` (incomplete API response) → flag for
-        update; spurious downloads beat silently missing a real change.
-
-    Both fallbacks resolve themselves on the next sync after a real
-    re-download, so persistent flapping isn't possible.
+    Tier 1: both sides have md5 → exact equality.
+    Tier 2: md5 missing on either side → file-size compare (same size
+            ⇒ probably same file, different size ⇒ definitely changed).
+    Tier 3: nothing comparable → conservative re-sync.
     """
-    if not prev.source_romm_md5:
-        return True
     server_md5 = rom.get("md5_hash")
-    if not isinstance(server_md5, str) or not server_md5:
-        return True
-    return prev.source_romm_md5 != server_md5
+    have_state_md5 = bool(prev.source_md5)
+    have_server_md5 = isinstance(server_md5, str) and bool(server_md5)
+
+    if have_state_md5 and have_server_md5:
+        return prev.source_md5 != server_md5
+
+    server_size = rom.get("fs_size_bytes")
+    if isinstance(server_size, int) and prev.source_size:
+        return server_size != prev.source_size
+
+    return True
 
 
 def _change_reason(rom: dict[str, Any], prev: RomState) -> str:
     server_md5 = rom.get("md5_hash")
-    if not prev.source_romm_md5:
-        return "no stored RomM-style md5 — re-syncing to populate state"
-    if not isinstance(server_md5, str) or not server_md5:
-        return "RomM did not surface md5_hash — re-syncing conservatively"
-    return f"md5 changed ({prev.source_romm_md5} → {server_md5})"
+    have_state_md5 = bool(prev.source_md5)
+    have_server_md5 = isinstance(server_md5, str) and bool(server_md5)
+    if have_state_md5 and have_server_md5:
+        return f"md5 changed ({prev.source_md5} → {server_md5})"
+    server_size = rom.get("fs_size_bytes")
+    if isinstance(server_size, int) and prev.source_size:
+        return (
+            f"fs_size_bytes changed ({prev.source_size} → {server_size}; "
+            "md5 unavailable, size fallback)"
+        )
+    return "no comparable signal — re-syncing conservatively"

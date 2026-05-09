@@ -133,13 +133,12 @@ def test_add_action_with_unzip_extracts_and_records_state(tmp_path: Path) -> Non
     assert saved.platform_slug == "gc"
     assert saved.name == "Pikmin"
     assert saved.source_filename == "Pikmin.zip"
-    assert saved.source_md5 == md5_of(payload)
     assert saved.source_size == len(payload)
     assert saved.source_updated_at == "2026-04-25T12:00:00Z"
-    # `source_romm_md5` mirrors RomM's algorithm: largest-inner-file
+    # `source_md5` mirrors RomM's algorithm: largest-inner-file
     # md5 for archives → md5(b"iso-bytes") for this single-file zip.
     # Used as `compute_plan`'s deterministic change-detection signal.
-    assert saved.source_romm_md5 == md5_of(b"iso-bytes")
+    assert saved.source_md5 == md5_of(b"iso-bytes")
     assert saved.transforms == ("unzip",)
     assert len(saved.outputs) == 1
     assert saved.outputs[0].path == "gc/Game.iso"

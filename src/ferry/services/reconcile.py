@@ -340,7 +340,6 @@ def synthesize_state_from_match(
     side update will refresh it on the first real sync.
     """
     rom_data = match.rom_data
-    file_data = match.file_data
     abs_path = orphan.abs_path
     output_md5 = hash_file_bytes(abs_path)
     # RomM-style md5 of the orphan file — populated so the planner's
@@ -350,16 +349,15 @@ def synthesize_state_from_match(
     # `rom_data.md5_hash`; for NameOnly adoptions the two diverge by
     # definition, but storing what we computed locally is correct
     # — it's our truth for "what's on disk under this rom_id."
-    source_romm_md5 = hash_orphan_file(abs_path)
+    source_md5 = hash_orphan_file(abs_path)
     return RomState(
         rom_id=match.rom_id,
         platform_slug=str(rom_data.get("platform_slug") or "?"),
         name=str(rom_data.get("name") or rom_data.get("fs_name") or "?"),
         source_filename=resolve_local_filename(rom_data, logger=logger),
-        source_md5=str(file_data.get("md5_hash") or ""),
+        source_md5=source_md5,
         source_size=_safe_int(rom_data.get("fs_size_bytes")) or 0,
         source_updated_at=str(rom_data.get("updated_at") or ""),
-        source_romm_md5=source_romm_md5,
         transforms=transforms_for_platform,
         outputs=(
             TransformedOutput(

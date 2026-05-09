@@ -49,14 +49,14 @@ def make_rom(make_output) -> Callable[..., RomState]:
             "platform_slug": "gc",
             "name": "Pikmin",
             "source_filename": "Pikmin.zip",
-            "source_md5": "0123456789abcdef0123456789abcdef",
+            # RomM-style hash (largest-inner-file md5 for archives,
+            # direct md5 otherwise). Matches `tests.test_sync_plan.romm_rom`'s
+            # `md5_hash` default so the by-default state vs. API-rom
+            # pairing classifies as unchanged (typical "nothing changed"
+            # baseline).
+            "source_md5": "11111111111111111111111111111111",
             "source_size": 2048,
             "source_updated_at": "2026-04-25T12:00:00Z",
-            # RomM-style hash: matches the `md5_hash` default in
-            # `tests.test_sync_plan.romm_rom` so the by-default state vs.
-            # API-rom pairing classifies as unchanged (the typical
-            # "nothing changed" baseline).
-            "source_romm_md5": "11111111111111111111111111111111",
             "transforms": ("unzip",),
             "outputs": (make_output(),),
             "primary_output_index": 0,

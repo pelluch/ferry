@@ -60,7 +60,6 @@ from ferry.services.save_backend import (
     get_or_register_device,
 )
 from ferry.services.save_backend_base import SaveBackend
-from ferry.services.state_hydrate import hydrate_romm_md5
 from ferry.services.sync_executor import (
     ExecutionResult,
     default_scratch_root,
@@ -185,38 +184,7 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
 
             state_path = default_state_path()
             state = load_state(state_path)
-            # Backfill `source_romm_md5` for legacy state entries (one-pass
-            # hash of local files). Hydration checkpoints state.json
-            # every N entries so an interrupted run resumes cleanly
-            # rather than restarting from zero. No-op once every entry
-            # has it.
-            if config.destination is not None:
-                pending = sum(1 for r in state.roms.values() if not r.source_romm_md5)
-                if pending:
-                    click.echo(
-                        f"hashing {pending} legacy state entr"
-                        f"{'y' if pending == 1 else 'ies'} "
-                        "to populate source_romm_md5 (one-time, resumable; "
-                        "can take several minutes for large libraries)…"
-                    )
-
-                    def _progress(partial: LibraryState, done: int, rom: RomState) -> None:
-                        click.echo(f"  [{done}/{pending}] {rom.name}")
-
-                    def _checkpoint(partial: LibraryState, done: int) -> None:
-                        save_state(partial, state_path)
-
-                    state, hydrated = hydrate_romm_md5(
-                        state,
-                        config.destination.roms_base,
-                        on_progress=_progress,
-                        on_checkpoint=_checkpoint,
-                    )
-                    if hydrated:
-                        click.echo(f"  ✓ hydrated {hydrated} entr{'y' if hydrated == 1 else 'ies'}")
-                        save_state(state, state_path)
-                else:
-                    state, _ = hydrate_romm_md5(state, config.destination.roms_base)
+            _warn_if_romm_hashes_disabled(current_roms)
             trash_root = default_trash_root()
             plan = compute_plan(
                 current_roms=current_roms,
@@ -347,6 +315,34 @@ def _run_saves_only(
         # explicitly invoked it; saves-only is more often run from automation
         # (launch hooks) where we want to fail soft.
         click.echo(f"save sync skipped: {e}")
+
+
+def _warn_if_romm_hashes_disabled(current_roms: list[dict[str, Any]]) -> None:
+    """Emit a one-line note when most/all roms in the response lack `md5_hash`.
+
+    RomM's hash computation is configurable; large libraries sometimes
+    disable it for performance. Without `rom.md5_hash`, ferry's
+    `compute_plan` falls back to file-size comparison instead of
+    deterministic md5 equality — same-size content replacements slip
+    through that fallback. Worth telling the user once so they know
+    they're on the weaker check.
+
+    Threshold: >50% of roms missing the field. Below that, this is
+    probably noise (a few unscanned files), not a global setting.
+    """
+    if not current_roms:
+        return
+    missing = sum(
+        1 for rom in current_roms if not isinstance(rom.get("md5_hash"), str) or not rom["md5_hash"]
+    )
+    if missing > len(current_roms) // 2:
+        click.echo(
+            f"note: {missing}/{len(current_roms)} ROMs in RomM lack `md5_hash`; "
+            "ferry will fall back to file-size comparison for change detection. "
+            "Enable hash computation in RomM admin settings for deterministic "
+            "checks (catches same-size file replacements that the size fallback "
+            "misses)."
+        )
 
 
 def _warn_on_launch_hook_upstream_drift() -> None:

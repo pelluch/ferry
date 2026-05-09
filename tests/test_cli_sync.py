@@ -382,7 +382,7 @@ def test_sync_idempotent_second_run_is_a_no_op(tmp_path: Path, monkeypatch) -> N
     payload = make_zip_bytes({"A.iso": b"a"})
     # `md5_hash` mirrors RomM's algorithm: largest-inner-file md5
     # (md5(b"a") == 0cc175b9...), matching what `hash_orphan_file`
-    # computes locally and stores into `source_romm_md5`. Equal values
+    # computes locally and stores into `source_md5`. Equal values
     # → second sync classifies as unchanged via the deterministic
     # md5 compare; without setting md5_hash here the planner would
     # fire its conservative "server omits md5_hash" path.
