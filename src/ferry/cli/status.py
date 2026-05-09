@@ -20,21 +20,18 @@ from ferry.adapters.dolphin_paths import (
     DolphinInstall,
     discover_dolphin_installs,
 )
-from ferry.adapters.dolphin_paths import (
-    select_active_install as select_active_dolphin,
-)
 from ferry.adapters.esde_paths import ESDEInstall, discover_esde_installs
 from ferry.adapters.retroarch_core_info import CoreInfoIndex
 from ferry.adapters.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
-    select_active_install,
 )
 from ferry.adapters.retroarch_saves import list_local_saves as list_ra_local_saves
 from ferry.adapters.state_store import default_state_path, load_state
 from ferry.cli._utils import format_bytes, mask_token, path_status
 from ferry.config import ConfigError, load_config
 from ferry.config.schema import Config
+from ferry.domain.install_selection import ResolutionReason, resolve_install
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.state import LibraryState, RomState
 from ferry.services.launch_hooks import (
@@ -132,38 +129,46 @@ def _print_retroarch_status(config: Config) -> None:
     When the user has `[saves].retroarch_install` configured AND it matches
     a discovered install, the configured choice wins over auto-selection —
     even if multiple installs would otherwise be ambiguous. That mirrors
-    what `ferry sync` actually does at runtime.
+    what `ferry sync` actually does at runtime. EXPLICIT_MISMATCH (the
+    configured name doesn't match any discovered install) falls through
+    to auto-select after a warning, so the user sees what's actually there.
     """
     installs = discover_retroarch_installs()
-    if not installs:
+    configured = config.saves.retroarch_install if config.saves else None
+    resolution = resolve_install(
+        installs,
+        configured_source=configured,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    )
+
+    if resolution.reason == ResolutionReason.NO_INSTALLS:
         click.echo("  retroarch:   (not detected)")
         return
-
-    configured_choice = config.saves.retroarch_install if config.saves else None
-    if configured_choice is not None:
-        match = next((i for i in installs if i.source == configured_choice), None)
-        if match is not None:
-            _print_install_line(match, indent="  retroarch:   ")
-            click.echo(f"    (selected via [saves].retroarch_install = {configured_choice!r})")
-            return
-        # Configured value present but no discovered install matches — fall
-        # through to the auto-select path so the user sees what's actually
-        # there. The mismatch is also surfaced as a warning.
+    if resolution.reason == ResolutionReason.EXPLICIT_MATCH:
+        _print_install_line(resolution.install, indent="  retroarch:   ")
+        click.echo(f"    (selected via [saves].retroarch_install = {configured!r})")
+        return
+    if resolution.reason == ResolutionReason.EXPLICIT_MISMATCH:
         click.echo(
-            f"  warning: [saves].retroarch_install = {configured_choice!r} "
+            f"  warning: [saves].retroarch_install = {configured!r} "
             "but no discovered install matches; auto-selecting:"
         )
-
-    active = select_active_install(installs)
-    if active is None:
-        # 2+ installs with saves — surface the conflict so the user knows
-        # ferry won't sync until they disambiguate.
+        resolution = resolve_install(
+            installs,
+            configured_source=None,
+            source_of=lambda i: i.source,
+            has_active=lambda i: i.has_saves,
+        )
+    if resolution.reason == ResolutionReason.AMBIGUOUS:
         click.echo("  retroarch:   AMBIGUOUS — multiple active installs detected:")
         for install in installs:
             _print_install_line(install, indent="    ")
         click.echo("    (set [saves.retroarch_install] in config to pick one)")
         return
 
+    active = resolution.install
+    assert active is not None
     _print_install_line(active, indent="  retroarch:   ")
     if len(installs) > 1:
         click.echo(
@@ -195,30 +200,41 @@ def _print_dolphin_status(config: Config) -> None:
     v3 — surface clearly so the user knows what to do.
     """
     installs = discover_dolphin_installs()
-    if not installs:
+    configured = config.saves.dolphin_install if config.saves else None
+    resolution = resolve_install(
+        installs,
+        configured_source=configured,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    )
+
+    if resolution.reason == ResolutionReason.NO_INSTALLS:
         click.echo("  dolphin:     (not detected)")
         return
-
-    configured_choice = config.saves.dolphin_install if config.saves else None
-    if configured_choice is not None:
-        match = next((i for i in installs if i.source == configured_choice), None)
-        if match is not None:
-            _print_dolphin_install_line(match, indent="  dolphin:     ")
-            click.echo(f"    (selected via [saves].dolphin_install = {configured_choice!r})")
-            return
+    if resolution.reason == ResolutionReason.EXPLICIT_MATCH:
+        _print_dolphin_install_line(resolution.install, indent="  dolphin:     ")
+        click.echo(f"    (selected via [saves].dolphin_install = {configured!r})")
+        return
+    if resolution.reason == ResolutionReason.EXPLICIT_MISMATCH:
         click.echo(
-            f"  warning: [saves].dolphin_install = {configured_choice!r} "
+            f"  warning: [saves].dolphin_install = {configured!r} "
             "but no discovered install matches; auto-selecting:"
         )
-
-    active = select_active_dolphin(installs)
-    if active is None:
+        resolution = resolve_install(
+            installs,
+            configured_source=None,
+            source_of=lambda i: i.source,
+            has_active=lambda i: i.has_saves,
+        )
+    if resolution.reason == ResolutionReason.AMBIGUOUS:
         click.echo("  dolphin:     AMBIGUOUS — multiple active installs detected:")
         for install in installs:
             _print_dolphin_install_line(install, indent="    ")
         click.echo("    (set [saves.dolphin_install] in config to pick one)")
         return
 
+    active = resolution.install
+    assert active is not None
     _print_dolphin_install_line(active, indent="  dolphin:     ")
     if len(installs) > 1:
         click.echo(
@@ -401,10 +417,12 @@ def _resolve_ra_install_for_orphans(
     or the configured choice doesn't match — in those cases the
     `[saves]` section has already told the user; we stay quiet here.
     """
-    configured = config.saves.retroarch_install if config.saves else None
-    if configured is not None:
-        return next((i for i in installs if i.source == configured), None)
-    return select_active_install(installs)
+    return resolve_install(
+        installs,
+        configured_source=config.saves.retroarch_install if config.saves else None,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    ).install
 
 
 def _load_core_info_index(install: RetroArchInstall) -> CoreInfoIndex:

@@ -8,9 +8,6 @@ from ferry.adapters.dolphin_paths import (
     DolphinInstall,
     discover_dolphin_installs,
 )
-from ferry.adapters.dolphin_paths import (
-    select_active_install as select_active_dolphin,
-)
 from ferry.adapters.dolphin_tool import (
     DiscHeaderCache,
     default_cache_path,
@@ -19,7 +16,6 @@ from ferry.adapters.dolphin_tool import (
 from ferry.adapters.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
-    select_active_install,
 )
 from ferry.adapters.romm import (
     RommApi,
@@ -36,6 +32,11 @@ from ferry.adapters.state_store import (
 from ferry.cli._utils import DEFAULT_PREVIEW
 from ferry.config import ConfigError, SavesConfig, SyncConfig, load_config
 from ferry.config.schema import Config
+from ferry.domain.install_selection import (
+    InstallResolution,
+    ResolutionReason,
+    resolve_install,
+)
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.rom_files import resolve_local_filename
 from ferry.domain.save_plan import PlannedSaveAction, SavePlan
@@ -418,21 +419,25 @@ def _preview_retroarch(
 def _resolve_retroarch_install_for_preview(
     saves_cfg: SavesConfig, installs: list[RetroArchInstall]
 ) -> RetroArchInstall | None:
-    if saves_cfg.retroarch_install is not None:
-        match = next((i for i in installs if i.source == saves_cfg.retroarch_install), None)
-        if match is None:
-            click.echo(
-                f"Save sync (RetroArch): would skip ([saves].retroarch_install = "
-                f"{saves_cfg.retroarch_install!r} but no install matches)"
-            )
-        return match
-    active = select_active_install(installs)
-    if active is None:
+    # Outer caller already printed the no-installs message before the
+    # list got here, so we never see NO_INSTALLS at this site.
+    resolution = resolve_install(
+        installs,
+        configured_source=saves_cfg.retroarch_install,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    )
+    if resolution.reason == ResolutionReason.EXPLICIT_MISMATCH:
+        click.echo(
+            f"Save sync (RetroArch): would skip ([saves].retroarch_install = "
+            f"{saves_cfg.retroarch_install!r} but no install matches)"
+        )
+    elif resolution.reason == ResolutionReason.AMBIGUOUS:
         click.echo(
             "Save sync (RetroArch): would skip (multiple active installs — "
             "set [saves].retroarch_install)"
         )
-    return active
+    return resolution.install
 
 
 def _preview_dolphin(
@@ -481,21 +486,25 @@ def _preview_dolphin(
 def _resolve_dolphin_install_for_preview(
     saves_cfg: SavesConfig, installs: list[DolphinInstall]
 ) -> DolphinInstall | None:
-    if saves_cfg.dolphin_install is not None:
-        match = next((i for i in installs if i.source == saves_cfg.dolphin_install), None)
-        if match is None:
-            click.echo(
-                f"Save sync (Dolphin): would skip ([saves].dolphin_install = "
-                f"{saves_cfg.dolphin_install!r} but no install matches)"
-            )
-        return match
-    active = select_active_dolphin(installs)
-    if active is None:
+    # Outer caller already printed the no-installs message; we never
+    # see NO_INSTALLS at this site.
+    resolution = resolve_install(
+        installs,
+        configured_source=saves_cfg.dolphin_install,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    )
+    if resolution.reason == ResolutionReason.EXPLICIT_MISMATCH:
+        click.echo(
+            f"Save sync (Dolphin): would skip ([saves].dolphin_install = "
+            f"{saves_cfg.dolphin_install!r} but no install matches)"
+        )
+    elif resolution.reason == ResolutionReason.AMBIGUOUS:
         click.echo(
             "Save sync (Dolphin): would skip (multiple active installs — "
             "set [saves].dolphin_install)"
         )
-    return active
+    return resolution.install
 
 
 def _print_save_plan(plan: SavePlan, *, full: bool) -> None:
@@ -618,31 +627,36 @@ def _prepare_save_backends(
 
 def _select_retroarch_install(saves_cfg: SavesConfig) -> RetroArchInstall | None:
     """Apply the user's `retroarch_install` override or fall back to auto-select."""
-    installs = discover_retroarch_installs()
-    if not installs:
+    resolution = resolve_install(
+        discover_retroarch_installs(),
+        configured_source=saves_cfg.retroarch_install,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    )
+    if resolution.install is None:
         click.echo("")
-        click.echo("save sync (RetroArch) skipped: no install detected.")
-        return None
+        click.echo(_retroarch_skip_message(resolution, saves_cfg))
+    return resolution.install
 
-    if saves_cfg.retroarch_install is not None:
-        for install in installs:
-            if install.source == saves_cfg.retroarch_install:
-                return install
-        click.echo("")
-        click.echo(
-            f"save sync (RetroArch) skipped: [saves].retroarch_install = "
-            f"{saves_cfg.retroarch_install!r} but no install matched."
-        )
-        return None
 
-    active = select_active_install(installs)
-    if active is None:
-        click.echo("")
-        click.echo(
-            "save sync (RetroArch) skipped: multiple installs with active saves "
-            "(set [saves].retroarch_install to disambiguate)."
-        )
-    return active
+def _retroarch_skip_message(
+    resolution: InstallResolution[RetroArchInstall], saves_cfg: SavesConfig
+) -> str:
+    match resolution.reason:
+        case ResolutionReason.NO_INSTALLS:
+            return "save sync (RetroArch) skipped: no install detected."
+        case ResolutionReason.EXPLICIT_MISMATCH:
+            return (
+                f"save sync (RetroArch) skipped: [saves].retroarch_install = "
+                f"{saves_cfg.retroarch_install!r} but no install matched."
+            )
+        case ResolutionReason.AMBIGUOUS:
+            return (
+                "save sync (RetroArch) skipped: multiple installs with active saves "
+                "(set [saves].retroarch_install to disambiguate)."
+            )
+        case _:
+            return "save sync (RetroArch) skipped."  # defensive
 
 
 def _select_dolphin_install(saves_cfg: SavesConfig) -> DolphinInstall | None:
@@ -650,30 +664,22 @@ def _select_dolphin_install(saves_cfg: SavesConfig) -> DolphinInstall | None:
 
     Skips the install when Slot A isn't in GCI Folder mode — v3 only
     syncs GCI Folder saves; raw `.raw` memcards aren't supported.
+    NO_INSTALLS is silent here (RA may still be configured); other
+    failure reasons surface a `skipped:` line.
     """
-    installs = discover_dolphin_installs()
-    if not installs:
-        return None  # silent — RA may still be configured
-
-    selected: DolphinInstall | None = None
-    if saves_cfg.dolphin_install is not None:
-        selected = next((i for i in installs if i.source == saves_cfg.dolphin_install), None)
-        if selected is None:
+    resolution = resolve_install(
+        discover_dolphin_installs(),
+        configured_source=saves_cfg.dolphin_install,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    )
+    selected = resolution.install
+    if selected is None:
+        message = _dolphin_skip_message(resolution, saves_cfg)
+        if message is not None:
             click.echo("")
-            click.echo(
-                f"save sync (Dolphin) skipped: [saves].dolphin_install = "
-                f"{saves_cfg.dolphin_install!r} but no install matched."
-            )
-            return None
-    else:
-        selected = select_active_dolphin(installs)
-        if selected is None:
-            click.echo("")
-            click.echo(
-                "save sync (Dolphin) skipped: multiple installs with active saves "
-                "(set [saves].dolphin_install to disambiguate)."
-            )
-            return None
+            click.echo(message)
+        return None
 
     if selected.slot_a_mode != "gci_folder":
         click.echo("")
@@ -685,6 +691,28 @@ def _select_dolphin_install(saves_cfg: SavesConfig) -> DolphinInstall | None:
         return None
 
     return selected
+
+
+def _dolphin_skip_message(
+    resolution: InstallResolution[DolphinInstall], saves_cfg: SavesConfig
+) -> str | None:
+    """None means stay silent — the no-installs case is a non-event for
+    Dolphin since RA may still carry the user's saves."""
+    match resolution.reason:
+        case ResolutionReason.NO_INSTALLS:
+            return None
+        case ResolutionReason.EXPLICIT_MISMATCH:
+            return (
+                f"save sync (Dolphin) skipped: [saves].dolphin_install = "
+                f"{saves_cfg.dolphin_install!r} but no install matched."
+            )
+        case ResolutionReason.AMBIGUOUS:
+            return (
+                "save sync (Dolphin) skipped: multiple installs with active saves "
+                "(set [saves].dolphin_install to disambiguate)."
+            )
+        case _:
+            return None
 
 
 def _build_dolphin_backend(
