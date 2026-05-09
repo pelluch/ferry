@@ -60,6 +60,7 @@ from ferry.services.save_backend import (
     get_or_register_device,
 )
 from ferry.services.save_backend_base import SaveBackend
+from ferry.services.state_hydrate import hydrate_romm_md5
 from ferry.services.sync_executor import (
     ExecutionResult,
     default_scratch_root,
@@ -184,6 +185,17 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
 
             state_path = default_state_path()
             state = load_state(state_path)
+            # Backfill `source_romm_md5` for legacy state entries (one-pass
+            # hash of local files). Persist immediately so a crash mid-run
+            # doesn't lose the work. No-op once every entry has it.
+            if config.destination is not None:
+                state, hydrated = hydrate_romm_md5(state, config.destination.roms_base)
+                if hydrated:
+                    click.echo(
+                        f"hydrated source_romm_md5 for {hydrated} legacy state entr"
+                        f"{'y' if hydrated == 1 else 'ies'}"
+                    )
+                    save_state(state, state_path)
             trash_root = default_trash_root()
             plan = compute_plan(
                 current_roms=current_roms,

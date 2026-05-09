@@ -343,6 +343,14 @@ def synthesize_state_from_match(
     file_data = match.file_data
     abs_path = orphan.abs_path
     output_md5 = hash_file_bytes(abs_path)
+    # RomM-style md5 of the orphan file — populated so the planner's
+    # deterministic change-detection compares cleanly post-adoption
+    # (without it, the next sync's `compute_plan` would flag the
+    # adopted rom for update). For Confident matches this equals
+    # `rom_data.md5_hash`; for NameOnly adoptions the two diverge by
+    # definition, but storing what we computed locally is correct
+    # — it's our truth for "what's on disk under this rom_id."
+    source_romm_md5 = hash_orphan_file(abs_path)
     return RomState(
         rom_id=match.rom_id,
         platform_slug=str(rom_data.get("platform_slug") or "?"),
@@ -351,6 +359,7 @@ def synthesize_state_from_match(
         source_md5=str(file_data.get("md5_hash") or ""),
         source_size=_safe_int(rom_data.get("fs_size_bytes")) or 0,
         source_updated_at=str(rom_data.get("updated_at") or ""),
+        source_romm_md5=source_romm_md5,
         transforms=transforms_for_platform,
         outputs=(
             TransformedOutput(

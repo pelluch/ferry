@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ferry.adapters.orphan_hash import hash_orphan_file
 from ferry.adapters.romm import RommApi, RommApiError
 from ferry.adapters.state_store import save_state
 from ferry.config import TransformsConfig
@@ -315,6 +316,13 @@ def _execute_one(
         )
         primary_index = _pick_primary_index(pipeline_outputs)
 
+        # Compute the RomM-style md5 (largest-inner-file for archives,
+        # direct md5 for non-archives). Stored as the deterministic
+        # change-detection signal `compute_plan` compares against
+        # `rom.md5_hash` from the API. Non-load-bearing if it fails
+        # (returns None) — next sync will re-flag for update.
+        source_romm_md5 = hash_orphan_file(source_path)
+
         new_state = RomState(
             rom_id=rom_id,
             platform_slug=platform,
@@ -323,6 +331,7 @@ def _execute_one(
             source_md5=download_result.md5,
             source_size=download_result.size,
             source_updated_at=str(rom_data.get("updated_at", "")),
+            source_romm_md5=source_romm_md5,
             transforms=tuple(transforms_cfg.for_platform(platform)),
             outputs=outputs,
             primary_output_index=primary_index,

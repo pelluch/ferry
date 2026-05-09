@@ -81,9 +81,17 @@ class RomState:
 
     # Source provenance — what RomM had when we last fetched.
     source_filename: str
-    source_md5: str  # always our locally computed hash
+    source_md5: str  # md5 of the bytes we received from RomM (the as-served file)
     source_size: int
-    source_updated_at: str  # ISO 8601 from RomM; primary change-detection signal
+    source_updated_at: str  # ISO 8601 from RomM
+    # md5 computed via RomM's algorithm — `largest-inner-file` for
+    # zip/tar/gz/bz2/7z archives, direct md5 for non-archives. Used by
+    # `compute_plan` as the deterministic "did the file actually change?"
+    # signal: equality with `rom.md5_hash` from the API ⇒ unchanged,
+    # regardless of whether RomM's row-level `updated_at` drifted from a
+    # metadata refresh. None for legacy state entries written before
+    # this field existed; lazy hydration backfills on first sync.
+    source_romm_md5: str | None = None
 
     # Transform pipeline applied to the source file.
     transforms: tuple[str, ...]
@@ -247,6 +255,15 @@ def _rom_from_dict(raw: dict[str, Any]) -> RomState:
         raise StateDecodeError("rom.saves must be a list (or omitted)")
     saves = tuple(_save_record_from_dict(s) for s in saves_raw)
 
+    # `source_romm_md5` is optional — legacy state files written before
+    # the field existed pass through with None and get backfilled by
+    # lazy hydration on first sync. Empty string is normalized to None
+    # so a partial write doesn't get mistaken for a populated value.
+    romm_md5_raw = raw.get("source_romm_md5")
+    if romm_md5_raw is not None and not isinstance(romm_md5_raw, str):
+        raise StateDecodeError("rom.source_romm_md5 must be a string or null")
+    source_romm_md5 = romm_md5_raw if romm_md5_raw else None
+
     return RomState(
         rom_id=raw["rom_id"],
         platform_slug=raw["platform_slug"],
@@ -255,6 +272,7 @@ def _rom_from_dict(raw: dict[str, Any]) -> RomState:
         source_md5=raw["source_md5"],
         source_size=raw["source_size"],
         source_updated_at=raw["source_updated_at"],
+        source_romm_md5=source_romm_md5,
         transforms=tuple(transforms_raw),
         outputs=outputs,
         primary_output_index=primary,

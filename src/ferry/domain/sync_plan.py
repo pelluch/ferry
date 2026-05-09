@@ -7,8 +7,14 @@ Consumers of the resulting plan are:
 - the delete-on-remove path → executes `to_delete`
 - `ferry sync --dry-run` → prints the plan and exits
 
-Change detection rides on `updated_at`, not on hashes (see DESIGN.md and
-the state-checkpoint commit message). The hash check is at download time.
+Change detection compares `state.source_romm_md5` (a md5 computed via
+RomM's `largest-inner-file-for-archives` algorithm, populated by the
+download path or by lazy hydration over local files) against the
+server's `rom.md5_hash`. RomM's row-level `updated_at` is unreliable —
+its scan path bumps `updated_at` on every rescan when refreshing
+cover/screenshot/manual asset paths even when the underlying file is
+identical, which would otherwise trigger a full re-download of the
+library on every metadata refresh.
 """
 
 from __future__ import annotations
@@ -18,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 from ferry.domain.destination import Destination
-from ferry.domain.iso_time import same_iso_instant
 from ferry.domain.state import LibraryState, RomState
 
 
@@ -126,8 +131,7 @@ def compute_plan(
             )
             continue
 
-        current_updated_at = rom.get("updated_at")
-        if not same_iso_instant(current_updated_at, prev.source_updated_at):
+        if _content_changed(rom, prev):
             to_update.append(
                 UpdateAction(
                     rom_id=rom_id,
@@ -135,9 +139,7 @@ def compute_plan(
                     platform_slug=platform,
                     rom_data=rom,
                     previous=prev,
-                    reason=(
-                        f"updated_at changed ({prev.source_updated_at} → {current_updated_at})"
-                    ),
+                    reason=_change_reason(rom, prev),
                 )
             )
         elif destination is not None and _primary_missing(prev, destination):
@@ -187,3 +189,39 @@ def _primary_missing(prev: RomState, destination: Destination) -> bool:
     """Return True when the previously-recorded primary output is gone from disk."""
     primary_path: Path = destination.roms_base / prev.primary_output.path
     return not primary_path.exists()
+
+
+def _content_changed(rom: dict[str, Any], prev: RomState) -> bool:
+    """True iff the API rom-row's RomM-style md5 differs from stored state.
+
+    Both sides use RomM's `largest-inner-file-for-archives` md5 algorithm
+    (see `adapters/orphan_hash.hash_orphan_file` for ferry's mirror).
+    Equality ⇒ same file content; we skip re-download regardless of any
+    `updated_at` drift.
+
+    Conservative branches when we can't make a clean equality call:
+      - state lacks `source_romm_md5` (legacy entries before lazy
+        hydration ran, or hydration failed because the file was missing)
+        → flag for update; the re-download populates the field for next
+        sync.
+      - server omits `md5_hash` (incomplete API response) → flag for
+        update; spurious downloads beat silently missing a real change.
+
+    Both fallbacks resolve themselves on the next sync after a real
+    re-download, so persistent flapping isn't possible.
+    """
+    if not prev.source_romm_md5:
+        return True
+    server_md5 = rom.get("md5_hash")
+    if not isinstance(server_md5, str) or not server_md5:
+        return True
+    return prev.source_romm_md5 != server_md5
+
+
+def _change_reason(rom: dict[str, Any], prev: RomState) -> str:
+    server_md5 = rom.get("md5_hash")
+    if not prev.source_romm_md5:
+        return "no stored RomM-style md5 — re-syncing to populate state"
+    if not isinstance(server_md5, str) or not server_md5:
+        return "RomM did not surface md5_hash — re-syncing conservatively"
+    return f"md5 changed ({prev.source_romm_md5} → {server_md5})"

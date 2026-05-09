@@ -13,8 +13,11 @@ def romm_rom(
     updated_at: str = "2026-04-25T12:00:00Z",
     fs_name: str = "Game.zip",
     fs_size_bytes: int = 1024,
-    md5_hash: str | None = None,
+    md5_hash: str | None = "11111111111111111111111111111111",
 ) -> dict:
+    """Default `md5_hash` matches the `source_romm_md5` baked into
+    `conftest.make_rom`, so a state-rom paired with an API-rom by
+    rom_id classifies as unchanged unless a test overrides one side."""
     return {
         "id": rom_id,
         "name": name,
@@ -42,63 +45,67 @@ def test_empty_state_yields_all_adds() -> None:
     assert plan.unchanged_count == 0
 
 
-def test_unchanged_when_updated_at_matches(make_rom) -> None:
-    state = LibraryState(roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00Z")})
-    plan = compute_plan(
-        current_roms=[romm_rom(1, updated_at="2026-04-25T12:00:00Z")],
-        state=state,
-    )
+def test_unchanged_when_romm_md5_matches(make_rom) -> None:
+    """Equal md5 ⇒ same content. The default fixtures pair on md5
+    `11...11`; no override needed."""
+    state = LibraryState(roms={1: make_rom(rom_id=1)})
+    plan = compute_plan(current_roms=[romm_rom(1)], state=state)
     assert plan.unchanged_count == 1
     assert plan.to_add == []
     assert plan.to_update == []
     assert plan.to_delete == []
 
 
-def test_unchanged_when_updated_at_format_differs_but_instant_matches(make_rom) -> None:
-    """Regression: state stores `+00:00` form, API returns `Z` form for
-    the same instant. Lexical compare would flag every ROM in state as
-    needing update; instant-aware compare correctly says unchanged.
+def test_unchanged_when_only_updated_at_drifted_but_md5_matches(make_rom) -> None:
+    """Regression for the live-test bug observed on 2026-05-08.
 
-    Reproduces the live-test bug observed on 2026-05-08 where the user's
-    state had `2026-04-28T12:14:09+00:00` but `compute_plan` flagged 510
-    ROMs for update.
+    A `Scan library` on RomM bumps `rom.updated_at` for every scanned
+    rom (RomM's scan path calls `update_rom(id, {path_cover_s, ...})`
+    after each rom, triggering SQLAlchemy `onupdate`) without touching
+    the underlying file. The deterministic md5 compare correctly
+    classifies this as unchanged regardless of `updated_at` drift.
     """
     state = LibraryState(
-        roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00+00:00")}
+        roms={1: make_rom(rom_id=1, source_updated_at="2026-04-28T12:14:09+00:00")}
     )
     plan = compute_plan(
-        current_roms=[romm_rom(1, updated_at="2026-04-25T12:00:00Z")],
+        current_roms=[romm_rom(1, updated_at="2026-05-09T04:45:05+00:00")],
         state=state,
     )
     assert plan.unchanged_count == 1
     assert plan.to_update == []
 
 
-def test_unchanged_when_microseconds_truncated(make_rom) -> None:
-    """RomM's list endpoint truncates microseconds while POST/PUT
-    responses preserve them. Same instant; should be unchanged."""
-    state = LibraryState(
-        roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00.123456+00:00")}
-    )
+def test_update_when_romm_md5_differs(make_rom) -> None:
+    """Different md5 ⇒ real file change ⇒ to_update."""
+    state = LibraryState(roms={1: make_rom(rom_id=1)})  # source_romm_md5 default 11..
     plan = compute_plan(
-        current_roms=[romm_rom(1, updated_at="2026-04-25T12:00:00+00:00")],
-        state=state,
-    )
-    assert plan.unchanged_count == 1
-    assert plan.to_update == []
-
-
-def test_update_when_updated_at_differs(make_rom) -> None:
-    state = LibraryState(roms={1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00Z")})
-    plan = compute_plan(
-        current_roms=[romm_rom(1, updated_at="2026-04-26T12:00:00Z")],
+        current_roms=[romm_rom(1, md5_hash="2" * 32)],
         state=state,
     )
     assert plan.to_add == []
     assert len(plan.to_update) == 1
     assert plan.to_update[0].rom_id == 1
-    assert "2026-04-25" in plan.to_update[0].reason  # old timestamp surfaced
-    assert "2026-04-26" in plan.to_update[0].reason  # new timestamp surfaced
+    assert "md5 changed" in plan.to_update[0].reason
+
+
+def test_update_when_state_lacks_romm_md5(make_rom) -> None:
+    """Legacy state entry (pre-`source_romm_md5` schema) → flag for
+    re-sync. Hydration normally backfills this before compute_plan
+    runs; this branch is the failsafe for hydration-skipped entries
+    (file missing on disk, hash compute failed)."""
+    state = LibraryState(roms={1: make_rom(rom_id=1, source_romm_md5=None)})
+    plan = compute_plan(current_roms=[romm_rom(1)], state=state)
+    assert len(plan.to_update) == 1
+    assert "no stored RomM-style md5" in plan.to_update[0].reason
+
+
+def test_update_when_server_omits_md5_hash(make_rom) -> None:
+    """API rom-row missing `md5_hash` → conservative re-sync."""
+    state = LibraryState(roms={1: make_rom(rom_id=1)})
+    plan = compute_plan(current_roms=[romm_rom(1, md5_hash=None)], state=state)
+    assert len(plan.to_update) == 1
+    assert "did not surface md5_hash" in plan.to_update[0].reason
 
 
 def test_planner_always_populates_to_delete(make_rom) -> None:
@@ -115,15 +122,15 @@ def test_planner_always_populates_to_delete(make_rom) -> None:
 def test_mixed_plan(make_rom) -> None:
     state = LibraryState(
         roms={
-            1: make_rom(rom_id=1, source_updated_at="2026-04-25T12:00:00Z"),  # unchanged
-            2: make_rom(rom_id=2, source_updated_at="2026-04-25T12:00:00Z"),  # to update
+            1: make_rom(rom_id=1),  # unchanged (md5 matches default)
+            2: make_rom(rom_id=2, source_romm_md5="aaaa" * 8),  # to update (md5 differs)
             3: make_rom(rom_id=3, name="Removed"),  # to delete
         }
     )
     plan = compute_plan(
         current_roms=[
-            romm_rom(1, updated_at="2026-04-25T12:00:00Z"),
-            romm_rom(2, updated_at="2026-04-26T12:00:00Z"),
+            romm_rom(1),  # md5 matches state's default
+            romm_rom(2),  # md5 default differs from state's "aaaa..."
             romm_rom(99, name="Brand New"),
         ],
         state=state,
