@@ -152,6 +152,35 @@ def test_has_saves_ignores_non_gci_files(tmp_path: Path) -> None:
     assert result[0].has_saves is False
 
 
+def test_retrodeck_install_populates_wii_saves_root(tmp_path: Path) -> None:
+    """RetroDECK is the v3.6 retrodeck-only ship — its profile pins a
+    Wii NAND root."""
+    _make_saves_dir(tmp_path, _RD_SAVES)
+    _write_config(tmp_path, _RD_CONFIG)
+    result = discover_dolphin_installs(tmp_path)
+    assert len(result) == 1
+    assert result[0].wii_saves_root == tmp_path / "retrodeck/saves/wii/dolphin/title"
+
+
+def test_emudeck_install_wii_saves_root_is_none(tmp_path: Path) -> None:
+    """EmuDeck Wii layout isn't pinned yet — install reports None and
+    the Wii backend skips it."""
+    _make_saves_dir(tmp_path, _EMUDECK_SAVES)
+    _write_config(tmp_path, _EMUDECK_CONFIG)
+    result = discover_dolphin_installs(tmp_path)
+    assert len(result) == 1
+    assert result[0].wii_saves_root is None
+
+
+def test_native_install_wii_saves_root_is_none(tmp_path: Path) -> None:
+    """Native Wii layout isn't pinned yet — install reports None."""
+    _make_saves_dir(tmp_path, _NATIVE_SAVES)
+    _write_config(tmp_path, _NATIVE_CONFIG)
+    result = discover_dolphin_installs(tmp_path)
+    assert len(result) == 1
+    assert result[0].wii_saves_root is None
+
+
 def test_has_saves_searches_recursively_across_regions(tmp_path: Path) -> None:
     saves = _make_saves_dir(tmp_path, _NATIVE_SAVES)
     _plant_gci(saves, region="EUR", name="01-GM8P-PALsave.gci")

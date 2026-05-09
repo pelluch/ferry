@@ -34,6 +34,42 @@ def test_parse_header_real_dolphin_tool_output() -> None:
     assert header == DiscHeader(game_code="GM8E", maker_code="01", region="NTSC-U")
 
 
+def test_parse_header_extracts_title_id_for_wii() -> None:
+    """Verbatim shape from `dolphin-tool header -j -i MetroidPrime3.rvz` (a Wii ROM).
+
+    JSON has no hex literal so dolphin-tool emits the decimal form; we
+    derive both representations from the canonical Python hex literal
+    to keep the conversion check honest.
+    """
+    title_id = 0x00010000524D3345
+    raw = f'{{"game_id":"RM3E01","region":"NTSC-U","country":"USA","title_id":{title_id}}}'
+    header = _parse_header_json(raw)
+    assert header is not None
+    assert header.title_id == title_id
+    assert header.title_id_hex == "00010000524d3345"
+    assert header.title_id_high == "00010000"
+    assert header.title_id_low == "524d3345"
+
+
+def test_parse_header_handles_missing_title_id() -> None:
+    """Some GC discs don't surface `title_id`; header still parses."""
+    raw = '{"game_id":"GM8E01","region":"NTSC-U"}'
+    header = _parse_header_json(raw)
+    assert header is not None
+    assert header.title_id is None
+    assert header.title_id_hex is None
+    assert header.title_id_high is None
+    assert header.title_id_low is None
+
+
+def test_parse_header_ignores_non_int_title_id() -> None:
+    """A stringy title_id (which dolphin-tool shouldn't emit) is treated as missing."""
+    raw = '{"game_id":"GM8E01","region":"NTSC-U","title_id":"some_string"}'
+    header = _parse_header_json(raw)
+    assert header is not None
+    assert header.title_id is None
+
+
 def test_parse_header_pal_game() -> None:
     raw = '{"game_id":"GM8P01","region":"PAL","country":"EUR"}'
     header = _parse_header_json(raw)
@@ -350,6 +386,43 @@ def test_cache_invalidates_on_mtime_change(tmp_path: Path) -> None:
     assert cache.get(rom) is None
 
 
+def test_cache_invalidates_pre_title_id_entries(tmp_path: Path) -> None:
+    """Entries written before `title_id` was added to the schema are
+    treated as cache misses so the next read re-shells out and upgrades
+    the entry."""
+    cache_path = tmp_path / "cache.json"
+    rom = _make_rom(tmp_path)
+    stat = rom.stat()
+    legacy_entry = {
+        str(rom): {
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "game_code": "GM8E",
+            "maker_code": "01",
+            "region": "NTSC-U",
+            # NOTE: no `title_id` — pre-migration entry
+        }
+    }
+    cache_path.write_text(json.dumps(legacy_entry))
+
+    cache = DiscHeaderCache(cache_path)
+    assert cache.get(rom) is None  # forces a fresh read on next access
+
+
+def test_cache_persists_title_id_for_wii_rom(tmp_path: Path) -> None:
+    cache = DiscHeaderCache(tmp_path / "cache.json")
+    rom = _make_rom(tmp_path)
+    header = DiscHeader(
+        game_code="RM3E", maker_code="01", region="NTSC-U", title_id=0x00010000524D3345
+    )
+    cache.put(rom, header)
+    cache2 = DiscHeaderCache(tmp_path / "cache.json")
+    restored = cache2.get(rom)
+    assert restored is not None
+    assert restored.title_id == 0x00010000524D3345
+    assert restored.title_id_high == "00010000"
+
+
 def test_cache_handles_missing_file_gracefully(tmp_path: Path) -> None:
     """If the ROM was deleted between cache write and read, get() returns None."""
     cache = DiscHeaderCache(tmp_path / "cache.json")
@@ -393,7 +466,7 @@ def test_cache_json_format_is_indented_and_sorted(tmp_path: Path) -> None:
     # Indented + each entry has all expected keys
     parsed = json.loads(raw)
     entry = next(iter(parsed.values()))
-    assert set(entry) == {"mtime_ns", "size", "game_code", "maker_code", "region"}
+    assert set(entry) == {"mtime_ns", "size", "game_code", "maker_code", "region", "title_id"}
     assert "  " in raw  # indented
 
 

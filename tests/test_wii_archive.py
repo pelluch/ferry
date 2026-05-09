@@ -21,6 +21,7 @@ from ferry.adapters.dolphin.wii_archive import (
     archive_save_folder,
     compute_content_hash,
     extract_save_zip,
+    folder_content_hash,
 )
 
 # ---------------------------------------------------------------------------
@@ -258,3 +259,66 @@ def test_compute_content_hash_empty_zip(tmp_path: Path) -> None:
         pass
     expected = hashlib.md5(b"", usedforsecurity=False).hexdigest()
     assert compute_content_hash(archive) == expected
+
+
+# ---------------------------------------------------------------------------
+# folder_content_hash
+# ---------------------------------------------------------------------------
+
+
+def test_folder_content_hash_matches_compute_content_hash(tmp_path: Path) -> None:
+    """The load-bearing equivalence: hashing a folder directly produces
+    the same hex string as hashing the zip we'd build from it. Lets
+    the walker emit `LocalSave.local_md5` values that match RomM's
+    server-side `content_hash` without ever materializing a zip."""
+    src = tmp_path / "src"
+    _populate(
+        src,
+        {
+            "save.bin": b"main save content",
+            "banner.bin": b"banner png bytes",
+            "nested/extra.dat": b"deep state",
+            "a/b/c/very/deep.bin": b"the deepest",
+        },
+    )
+
+    archive = tmp_path / "out.zip"
+    archive_save_folder(src, archive)
+
+    assert folder_content_hash(src) == compute_content_hash(archive)
+
+
+def test_folder_content_hash_skips_dotfiles(tmp_path: Path) -> None:
+    """Same dotfile filter as `archive_save_folder` — otherwise
+    a folder with `.DS_Store` would hash differently from its zip,
+    breaking the equivalence."""
+    src = tmp_path / "src"
+    _populate(
+        src,
+        {
+            "save.bin": b"real",
+            ".DS_Store": b"cruft",
+            "__MACOSX/save.bin": b"shadow",
+            "Thumbs.db": b"more cruft",
+        },
+    )
+    cleaned = tmp_path / "cleaned"
+    _populate(cleaned, {"save.bin": b"real"})
+
+    assert folder_content_hash(src) == folder_content_hash(cleaned)
+
+
+def test_folder_content_hash_changes_when_content_changes(tmp_path: Path) -> None:
+    src_a = tmp_path / "a"
+    _populate(src_a, {"save.bin": b"version 1"})
+    src_b = tmp_path / "b"
+    _populate(src_b, {"save.bin": b"version 2"})
+
+    assert folder_content_hash(src_a) != folder_content_hash(src_b)
+
+
+def test_folder_content_hash_empty_folder(tmp_path: Path) -> None:
+    src = tmp_path / "empty"
+    src.mkdir()
+    expected = hashlib.md5(b"", usedforsecurity=False).hexdigest()
+    assert folder_content_hash(src) == expected

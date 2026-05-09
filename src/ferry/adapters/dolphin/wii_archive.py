@@ -26,6 +26,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
+from ferry.domain.hashing import md5_file
 from ferry.transforms.unzip import is_unsafe_zip_member, is_within_dir
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ def archive_save_folder(src_folder: Path, dest_zip: Path) -> None:
     entries = sorted(
         path.relative_to(src_folder)
         for path in src_folder.rglob("*")
-        if path.is_file() and not _is_ignored(path.relative_to(src_folder))
+        if path.is_file() and not is_save_path_ignored(path.relative_to(src_folder))
     )
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_STORED) as zf:
@@ -80,7 +81,7 @@ def extract_save_zip(src_zip: Path, dest_folder: Path) -> None:
                 raise ValueError(
                     f"refusing to extract unsafe path from {src_zip.name}: {info.filename!r}"
                 )
-            if _is_ignored(Path(info.filename)):
+            if is_save_path_ignored(Path(info.filename)):
                 continue
             target = (dest_folder / info.filename).resolve()
             if not is_within_dir(target, output_root):
@@ -91,6 +92,27 @@ def extract_save_zip(src_zip: Path, dest_folder: Path) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info) as src_f, target.open("wb") as dst_f:
                 shutil.copyfileobj(src_f, dst_f)
+
+
+def folder_content_hash(src_folder: Path) -> str:
+    """Compute RomM-style content_hash directly from a folder.
+
+    Equivalent to `compute_content_hash(archive_save_folder(folder))`
+    by construction: same sorted-by-relpath traversal, same per-file
+    md5, same `name:hash` join, same outer md5. Same dotfile filter.
+
+    Used by the Wii walker so each `LocalSave.local_md5` matches what
+    RomM would store on the corresponding zip upload — without paying
+    the cost of zipping every walker iteration.
+    """
+    entries = sorted(
+        path.relative_to(src_folder)
+        for path in src_folder.rglob("*")
+        if path.is_file() and not is_save_path_ignored(path.relative_to(src_folder))
+    )
+    file_hashes = [f"{relpath.as_posix()}:{md5_file(src_folder / relpath)}" for relpath in entries]
+    combined = "\n".join(file_hashes)
+    return hashlib.md5(combined.encode(), usedforsecurity=False).hexdigest()
 
 
 def compute_content_hash(zip_path: Path) -> str:
@@ -122,8 +144,14 @@ def compute_content_hash(zip_path: Path) -> str:
     return hashlib.md5(combined.encode(), usedforsecurity=False).hexdigest()
 
 
-def _is_ignored(relpath: Path) -> bool:
-    """True iff *relpath* (relative to a save folder root) should be skipped."""
+def is_save_path_ignored(relpath: Path) -> bool:
+    """True iff *relpath* (relative to a save folder root) should be skipped.
+
+    Single source of truth for the dotfile filter shared between the
+    archiver, the extractor, and the Wii walker. Anything classified
+    as ignored here disappears from the content_hash, the zip, and the
+    walker's size/mtime aggregates — symmetric handling everywhere.
+    """
     if relpath.name in _IGNORED_NAMES:
         return True
     return any(part in _IGNORED_DIR_NAMES for part in relpath.parts)

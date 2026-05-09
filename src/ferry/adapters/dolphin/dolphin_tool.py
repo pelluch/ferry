@@ -78,11 +78,35 @@ class DiscHeader:
     `PAL`, `NTSC-K`. The walker maps this to a folder name based on the
     install's `region_encoding` (3-letter `USA/JAP/EUR` for native /
     EmuDeck, 2-letter `US/JP/EU` for RetroDECK).
+
+    `title_id` is the 64-bit Wii title id from the disc header (decimal
+    in dolphin-tool's JSON output, stored as int). Wii NAND saves live
+    at `title/<TID_HIGH>/<TID_LOW>/data/`; `title_id_high` / `title_id_low`
+    return the two 8-hex halves. None when dolphin-tool didn't surface
+    a `title_id` field — most GameCube discs include it, but the Wii
+    walker is the only consumer that requires it.
     """
 
     game_code: str
     maker_code: str
     region: str
+    title_id: int | None = None
+
+    @property
+    def title_id_hex(self) -> str | None:
+        if self.title_id is None:
+            return None
+        return f"{self.title_id:016x}"
+
+    @property
+    def title_id_high(self) -> str | None:
+        hex_form = self.title_id_hex
+        return hex_form[:8] if hex_form is not None else None
+
+    @property
+    def title_id_low(self) -> str | None:
+        hex_form = self.title_id_hex
+        return hex_form[8:] if hex_form is not None else None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -149,10 +173,13 @@ def _parse_header_json(raw: str) -> DiscHeader | None:
         # GameCube/Wii game IDs are always exactly 6 chars (4 gamecode + 2 maker).
         # Anything else means dolphin-tool returned something we don't understand.
         return None
+    raw_title_id = data.get("title_id")
+    title_id = raw_title_id if isinstance(raw_title_id, int) else None
     return DiscHeader(
         game_code=game_id[:4],
         maker_code=game_id[4:6],
         region=region,
+        title_id=title_id,
     )
 
 
@@ -296,11 +323,20 @@ class DiscHeaderCache:
         self._entries: dict[str, dict[str, Any]] = {}
 
     def get(self, rom_path: Path) -> DiscHeader | None:
-        """Return cached header iff mtime + size match the file on disk."""
+        """Return cached header iff mtime + size match the file on disk.
+
+        Entries written before `title_id` was added to the schema are
+        treated as cache misses so the next read re-shells out and
+        upgrades the entry. Cheaper than a global cache version bump,
+        and the cost is one re-read per ROM whose header was cached
+        pre-migration.
+        """
         self._ensure_loaded()
         entry = self._entries.get(str(rom_path))
         if entry is None:
             return None
+        if "title_id" not in entry:
+            return None  # pre-title_id schema; force a fresh read
         try:
             stat = rom_path.stat()
         except OSError:
@@ -312,6 +348,7 @@ class DiscHeaderCache:
                 game_code=entry["game_code"],
                 maker_code=entry["maker_code"],
                 region=entry["region"],
+                title_id=entry["title_id"],
             )
         except KeyError:
             return None
@@ -330,6 +367,7 @@ class DiscHeaderCache:
             "game_code": header.game_code,
             "maker_code": header.maker_code,
             "region": header.region,
+            "title_id": header.title_id,
         }
         self._write()
 

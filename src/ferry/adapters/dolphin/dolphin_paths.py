@@ -58,12 +58,19 @@ class _DolphinProfile:
 
     Paths are relative to `home`; expanded at discovery time. `config_path`
     is independent of `saves_root` because RetroDECK separates them.
+
+    `wii_saves_root_rel` is the per-title NAND root
+    (`title/<TID_HIGH>/<TID_LOW>/data/`). None for profiles whose Wii
+    layout we haven't pinned down yet — the Wii save backend skips
+    those installs entirely. Today only retrodeck is filled in;
+    emudeck-flatpak and native are added once verified on those layouts.
     """
 
     source: DolphinSource
     saves_root_rel: str
     config_path_rel: str
     region_encoding: RegionEncoding
+    wii_saves_root_rel: str | None = None
 
 
 # Order is preference for active-install selection — RetroDECK first since
@@ -76,6 +83,7 @@ _PROFILES: tuple[_DolphinProfile, ...] = (
         saves_root_rel="retrodeck/saves/gc/dolphin",
         config_path_rel=".var/app/net.retrodeck.retrodeck/config/dolphin-emu/Dolphin.ini",
         region_encoding="2-letter",
+        wii_saves_root_rel="retrodeck/saves/wii/dolphin/title",
     ),
     _DolphinProfile(
         source="emudeck-flatpak",
@@ -104,7 +112,13 @@ class DolphinInstall:
 
     `has_saves` is True iff any `.gci` file exists anywhere under
     `saves_root`. Used for active-install disambiguation when multiple
-    Dolphin installs are detected.
+    Dolphin installs are detected. (Wii NAND presence is intentionally
+    not folded into this signal in v3.6 — the install-selection layer
+    is revisited when Wii sync wires into the CLI.)
+
+    `wii_saves_root` is the per-title NAND root, or None when this
+    install's profile doesn't have a verified Wii layout. Wii-only
+    callers must check for None before walking.
     """
 
     source: DolphinSource
@@ -113,6 +127,7 @@ class DolphinInstall:
     region_encoding: RegionEncoding
     settings: DolphinSettings | None
     has_saves: bool
+    wii_saves_root: Path | None = None
 
     @property
     def slot_a_mode(self) -> MemcardMode:
@@ -143,6 +158,9 @@ def discover_dolphin_installs(home: Path | None = None) -> list[DolphinInstall]:
         config_path = home / profile.config_path_rel
         if not saves_root.is_dir() and not config_path.is_file():
             continue
+        wii_saves_root = (
+            home / profile.wii_saves_root_rel if profile.wii_saves_root_rel is not None else None
+        )
         installs.append(
             DolphinInstall(
                 source=profile.source,
@@ -151,6 +169,7 @@ def discover_dolphin_installs(home: Path | None = None) -> list[DolphinInstall]:
                 region_encoding=profile.region_encoding,
                 settings=parse_dolphin_ini(config_path),
                 has_saves=_has_gci_files(saves_root),
+                wii_saves_root=wii_saves_root,
             )
         )
     return installs
