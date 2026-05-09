@@ -189,12 +189,17 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
             # hash of local files). Persist immediately so a crash mid-run
             # doesn't lose the work. No-op once every entry has it.
             if config.destination is not None:
+                pending = sum(1 for r in state.roms.values() if not r.source_romm_md5)
+                if pending:
+                    click.echo(
+                        f"hashing {pending} legacy state entr"
+                        f"{'y' if pending == 1 else 'ies'} "
+                        "to populate source_romm_md5 (one-time; "
+                        "can take several minutes for large libraries)…"
+                    )
                 state, hydrated = hydrate_romm_md5(state, config.destination.roms_base)
                 if hydrated:
-                    click.echo(
-                        f"hydrated source_romm_md5 for {hydrated} legacy state entr"
-                        f"{'y' if hydrated == 1 else 'ies'}"
-                    )
+                    click.echo(f"  ✓ hydrated {hydrated} entr{'y' if hydrated == 1 else 'ies'}")
                     save_state(state, state_path)
             trash_root = default_trash_root()
             plan = compute_plan(
