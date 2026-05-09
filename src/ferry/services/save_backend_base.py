@@ -30,7 +30,7 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -421,72 +421,65 @@ class SaveBackendBase(ABC):
         return self._walk_local(synthetic)
 
     # ------------------------------------------------------------------
+    # Shared dispatch infrastructure
+    # ------------------------------------------------------------------
+
+    def _walk_inputs(
+        self, state: LibraryState, *, rom_filter: RomState | None = None
+    ) -> tuple[
+        dict[tuple[int, str, str], LocalSave],
+        dict[tuple[int, str, str], SaveRecord],
+        list[str],
+    ]:
+        """Walk local saves and index prior records. No I/O against RomM.
+
+        `rom_filter` narrows the walk to a single ROM — used by
+        `sync_for_rom` for the launch-wrapper fast path. Walker
+        "could not match" warnings are filtered out in that mode
+        (the walker was given one ROM's stem index, so unrelated
+        files in the saves dir aren't real findings).
+        """
+        if rom_filter is not None:
+            local_saves, walker_warnings = self._walk_local_for([rom_filter])
+            walker_warnings = [w for w in walker_warnings if "could not match" not in w]
+            prev_by_key = {
+                (rom_filter.rom_id, sr.emulator, sr.slot): sr
+                for sr in rom_filter.saves
+                if self._emulator_matches(sr.emulator)
+            }
+        else:
+            local_saves, walker_warnings = self._walk_local(state)
+            prev_by_key = index_prior_records(
+                state.roms.values(), emulator_matches=self._emulator_matches
+            )
+        local_by_key = {(ls.rom_id, ls.emulator, ls.slot): ls for ls in local_saves}
+        return local_by_key, prev_by_key, walker_warnings
+
+    def _fetch_server_index(
+        self, rom_id: int | None = None
+    ) -> dict[tuple[int, str, str], dict[str, Any]]:
+        """Fetch + index server saves. Raises RommApiError on fetch failure."""
+        server_saves = self._api.list_saves(rom_id=rom_id, device_id=self._device_id or None)
+        return index_server_saves(
+            server_saves,
+            emulator_matches=self._emulator_matches,
+            default_slot=self.default_slot,
+        )
+
+    # ------------------------------------------------------------------
     # sync
     # ------------------------------------------------------------------
 
     def sync(self, state: LibraryState) -> SaveSyncResult:
         """Run a full save-sync pass against `state.roms`."""
-        local_saves, walker_warnings = self._walk_local(state)
-
-        try:
-            server_saves = self._api.list_saves(device_id=self._device_id or None)
-        except RommApiError as exc:
-            return SaveSyncResult(
-                failed=[f"could not list server saves: {exc}"],
-                warnings=walker_warnings,
-            )
-
-        local_by_key = {(ls.rom_id, ls.emulator, ls.slot): ls for ls in local_saves}
-        server_by_key = index_server_saves(
-            server_saves,
-            emulator_matches=self._emulator_matches,
-            default_slot=self.default_slot,
-        )
-        prev_by_key = index_prior_records(
-            state.roms.values(), emulator_matches=self._emulator_matches
-        )
-
-        all_keys = set(local_by_key) | set(server_by_key) | set(prev_by_key)
-
-        result = SaveSyncResult(warnings=list(walker_warnings))
-        rom_save_updates: dict[int, dict[tuple[str, str], SaveRecord | None]] = {}
-
-        for key in sorted(all_keys):
-            rom_id, emulator, slot = key
-            rom = state.roms.get(rom_id)
-            if rom is None:
-                # Server has saves for a ROM not in our state — happens when
-                # ROMs have been removed locally but saves linger server-side.
-                continue
-            local = local_by_key.get(key)
-            server = server_by_key.get(key)
-            prev = prev_by_key.get(key)
-
-            should_update, outcome = self._process_key(
-                rom, emulator, slot, local, server, prev, result
-            )
-            if should_update:
-                rom_save_updates.setdefault(rom_id, {})[(emulator, slot)] = outcome
-
-        for rom_id, updates in rom_save_updates.items():
-            rom = state.roms[rom_id]
-            new_saves = merge_save_records(rom.saves, updates)
-            result.updated_roms[rom_id] = replace(rom, saves=new_saves)
-
-        return result
-
-    # ------------------------------------------------------------------
-    # sync_for_rom — narrowed to a single ROM
-    # ------------------------------------------------------------------
+        return self._run_sync(state, lookup_rom=state.roms.get, rom_filter=None)
 
     def sync_for_rom(self, rom: RomState, state: LibraryState) -> SaveSyncResult:
         """Run save sync narrowed to a single ROM.
 
-        Same dispatch logic as `.sync(state)` but the walker is given just
-        `[rom]`, the server fetch is filtered to that rom_id only, and only
-        that rom's prior records are considered. Used by launch-wrapper
-        hooks (`ferry sync --rom`) for fast per-game pre/post sync — one
-        narrow GET, one walker call, no full-library scan.
+        Used by launch-wrapper hooks (`ferry sync --rom`) for fast per-game
+        pre/post sync — one narrow GET, one walker call, no full-library
+        scan.
 
         If `rom` isn't in `state.roms` (orphan, not tracked by ferry yet),
         returns an empty result silently — the launch wrapper proceeds and
@@ -494,60 +487,66 @@ class SaveBackendBase(ABC):
         """
         if rom.rom_id not in state.roms:
             return SaveSyncResult()
+        return self._run_sync(
+            state,
+            lookup_rom=lambda rid: rom if rid == rom.rom_id else None,
+            rom_filter=rom,
+        )
 
-        local_saves, walker_warnings = self._walk_local_for([rom])
-        # Walker stem-mismatch warnings (RetroArch's "could not match save X
-        # to any known ROM") are spam in narrow mode — the walker was given
-        # one ROM's stem index, so most files in the saves dir won't match.
-        # That's expected, not a finding. Other walker warnings (file read
-        # errors, header failures, region issues) still pass through.
-        walker_warnings = [w for w in walker_warnings if "could not match" not in w]
+    def _run_sync(
+        self,
+        state: LibraryState,
+        *,
+        lookup_rom: Callable[[int], RomState | None],
+        rom_filter: RomState | None,
+    ) -> SaveSyncResult:
+        """Shared implementation of `sync` and `sync_for_rom`.
 
+        `lookup_rom` decides which ROM to associate with each key —
+        full-sync uses `state.roms.get`; per-rom sync uses a closure
+        that returns the passed-in rom (or None for keys that don't
+        belong to it). `rom_filter` narrows the walker + server fetch
+        in the per-rom case.
+        """
+        local_by_key, prev_by_key, walker_warnings = self._walk_inputs(state, rom_filter=rom_filter)
         try:
-            server_saves = self._api.list_saves(
-                rom_id=rom.rom_id, device_id=self._device_id or None
+            server_by_key = self._fetch_server_index(
+                rom_id=rom_filter.rom_id if rom_filter is not None else None
             )
         except RommApiError as exc:
             return SaveSyncResult(
                 failed=[f"could not list server saves: {exc}"],
-                warnings=walker_warnings,
+                warnings=list(walker_warnings),
             )
-
-        local_by_key = {(ls.rom_id, ls.emulator, ls.slot): ls for ls in local_saves}
-        server_by_key = index_server_saves(
-            server_saves,
-            emulator_matches=self._emulator_matches,
-            default_slot=self.default_slot,
-        )
-        # Prior records narrowed to this rom only — bypass the full
-        # `index_prior_records` scan since we already have the rom in hand.
-        prev_by_key = {
-            (rom.rom_id, sr.emulator, sr.slot): sr
-            for sr in rom.saves
-            if self._emulator_matches(sr.emulator)
-        }
-
-        all_keys = set(local_by_key) | set(server_by_key) | set(prev_by_key)
 
         result = SaveSyncResult(warnings=list(walker_warnings))
-        rom_save_updates: dict[tuple[str, str], SaveRecord | None] = {}
+        rom_save_updates: dict[int, dict[tuple[str, str], SaveRecord | None]] = {}
 
-        for key in sorted(all_keys):
+        for key in sorted(set(local_by_key) | set(server_by_key) | set(prev_by_key)):
             rom_id, emulator, slot = key
-            if rom_id != rom.rom_id:
-                continue  # defensive; the API filter should already enforce this
-            local = local_by_key.get(key)
-            server = server_by_key.get(key)
-            prev = prev_by_key.get(key)
+            rom = lookup_rom(rom_id)
+            if rom is None:
+                # Server has saves for a ROM not in our state — happens when
+                # ROMs have been removed locally but saves linger server-side.
+                continue
             should_update, outcome = self._process_key(
-                rom, emulator, slot, local, server, prev, result
+                rom,
+                emulator,
+                slot,
+                local_by_key.get(key),
+                server_by_key.get(key),
+                prev_by_key.get(key),
+                result,
             )
             if should_update:
-                rom_save_updates[(emulator, slot)] = outcome
+                rom_save_updates.setdefault(rom_id, {})[(emulator, slot)] = outcome
 
-        if rom_save_updates:
-            new_saves = merge_save_records(rom.saves, rom_save_updates)
-            result.updated_roms[rom.rom_id] = replace(rom, saves=new_saves)
+        for rom_id, updates in rom_save_updates.items():
+            rom = lookup_rom(rom_id)
+            if rom is None:
+                continue  # defensive — lookup_rom was happy a moment ago
+            new_saves = merge_save_records(rom.saves, updates)
+            result.updated_roms[rom_id] = replace(rom, saves=new_saves)
 
         return result
 
@@ -563,26 +562,15 @@ class SaveBackendBase(ABC):
         decision logic recording each intended action instead of
         executing.
         """
-        local_saves, walker_warnings = self._walk_local(state)
-
+        local_by_key, prev_by_key, walker_warnings = self._walk_inputs(state)
         try:
-            server_saves = self._api.list_saves(device_id=self._device_id or None)
+            server_by_key = self._fetch_server_index()
         except RommApiError as exc:
             return SavePlan(
                 backend_label=self.backend_label,
                 failed=(f"could not list server saves: {exc}",),
                 warnings=tuple(walker_warnings),
             )
-
-        local_by_key = {(ls.rom_id, ls.emulator, ls.slot): ls for ls in local_saves}
-        server_by_key = index_server_saves(
-            server_saves,
-            emulator_matches=self._emulator_matches,
-            default_slot=self.default_slot,
-        )
-        prev_by_key = index_prior_records(
-            state.roms.values(), emulator_matches=self._emulator_matches
-        )
         all_keys = set(local_by_key) | set(server_by_key) | set(prev_by_key)
 
         to_upload: list[PlannedSaveAction] = []
