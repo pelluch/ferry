@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ferry.adapters.dolphin_paths import (
+from ferry.adapters.dolphin.dolphin_paths import (
     DolphinInstall,
     discover_dolphin_installs,
     select_active_install,

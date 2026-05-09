@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ferry.adapters.retroarch_core_info import CoreInfoIndex, parse_core_info
-from ferry.adapters.retroarch_paths import RetroArchInstall
+from ferry.adapters.retroarch.retroarch_core_info import CoreInfoIndex, parse_core_info
+from ferry.adapters.retroarch.retroarch_paths import RetroArchInstall
 
 # ---------------------------------------------------------------------------
 # parse_core_info

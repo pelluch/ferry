@@ -30,9 +30,9 @@ from pathlib import Path
 from typing import Any
 
 from ferry import __version__
-from ferry.adapters.retroarch_core_info import CoreInfoIndex
-from ferry.adapters.retroarch_paths import RetroArchInstall
-from ferry.adapters.retroarch_saves import list_local_saves
+from ferry.adapters.retroarch.retroarch_core_info import CoreInfoIndex
+from ferry.adapters.retroarch.retroarch_paths import RetroArchInstall
+from ferry.adapters.retroarch.retroarch_saves import list_local_saves
 from ferry.adapters.romm import RommApi, RommApiError
 from ferry.domain.save_local import LocalSave  # noqa: F401 — re-exported for tests
 from ferry.domain.state import LibraryState, RomState

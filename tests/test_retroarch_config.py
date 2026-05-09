@@ -1,10 +1,10 @@
-"""Tests for ferry.adapters.retroarch_config.parse_retroarch_cfg."""
+"""Tests for ferry.adapters.retroarch.retroarch_config.parse_retroarch_cfg."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from ferry.adapters.retroarch_config import RetroArchSaveSettings, parse_retroarch_cfg
+from ferry.adapters.retroarch.retroarch_config import RetroArchSaveSettings, parse_retroarch_cfg
 
 
 def _write_cfg(path: Path, body: str) -> Path:

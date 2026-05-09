@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ferry.adapters.dolphin_tool import (
+from ferry.adapters.dolphin.dolphin_tool import (
     DiscHeader,
     DiscHeaderCache,
     DolphinTool,

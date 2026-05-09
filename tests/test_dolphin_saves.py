@@ -1,4 +1,4 @@
-"""Tests for ferry.adapters.dolphin_saves.list_local_saves."""
+"""Tests for ferry.adapters.dolphin.dolphin_saves.list_local_saves."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ferry.adapters.dolphin_paths import DolphinInstall, RegionEncoding
-from ferry.adapters.dolphin_saves import list_local_saves
-from ferry.adapters.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
+from ferry.adapters.dolphin.dolphin_paths import DolphinInstall, RegionEncoding
+from ferry.adapters.dolphin.dolphin_saves import list_local_saves
+from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
 from ferry.domain.state import RomState, TransformedOutput
 
 # ---------------------------------------------------------------------------

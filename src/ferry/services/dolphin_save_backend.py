@@ -18,13 +18,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ferry.adapters.dolphin_paths import DolphinInstall
-from ferry.adapters.dolphin_saves import (
+from ferry.adapters.dolphin.dolphin_paths import DolphinInstall
+from ferry.adapters.dolphin.dolphin_saves import (
     list_local_saves,
     lookup_disc_header,
     resolve_save_path,
 )
-from ferry.adapters.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
+from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
 from ferry.adapters.romm import RommApi
 from ferry.domain.save_local import LocalSave
 from ferry.domain.state import LibraryState, RomState

@@ -1,10 +1,10 @@
-"""Tests for ferry.adapters.dolphin_config.parse_dolphin_ini."""
+"""Tests for ferry.adapters.dolphin.dolphin_config.parse_dolphin_ini."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from ferry.adapters.dolphin_config import (
+from ferry.adapters.dolphin.dolphin_config import (
     SLOT_TYPE_MEMORY_CARD,
     SLOT_TYPE_MEMORY_CARD_FOLDER,
     SLOT_TYPE_NONE,

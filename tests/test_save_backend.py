@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import respx
 
-from ferry.adapters.retroarch_paths import RetroArchInstall
+from ferry.adapters.retroarch.retroarch_paths import RetroArchInstall
 from ferry.adapters.romm import RommApi, RommHttpAdapter
 from ferry.config import RommConfig
 from ferry.domain.state import LibraryState, RomState, SaveRecord, TransformedOutput

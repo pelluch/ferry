@@ -32,13 +32,13 @@ import logging
 from collections.abc import Iterable
 from pathlib import Path
 
-from ferry.adapters.retroarch_core_info import CoreInfoIndex
-from ferry.adapters.retroarch_paths import RetroArchInstall, is_ra_save_file
+from ferry.adapters.retroarch.retroarch_core_info import CoreInfoIndex
+from ferry.adapters.retroarch.retroarch_paths import RetroArchInstall, is_ra_save_file
 from ferry.domain.hashing import md5_file
 from ferry.domain.save_local import LocalSave
 from ferry.domain.state import RomState
 
-# Re-export so existing `from ferry.adapters.retroarch_saves import LocalSave`
+# Re-export so existing `from ferry.adapters.retroarch.retroarch_saves import LocalSave`
 # imports keep working. The canonical home is `ferry.domain.save_local`.
 __all__ = ("LocalSave", "list_local_saves")
 

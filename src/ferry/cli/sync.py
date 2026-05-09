@@ -4,16 +4,16 @@ from typing import Any
 
 import click
 
-from ferry.adapters.dolphin_paths import (
+from ferry.adapters.dolphin.dolphin_paths import (
     DolphinInstall,
     discover_dolphin_installs,
 )
-from ferry.adapters.dolphin_tool import (
+from ferry.adapters.dolphin.dolphin_tool import (
     DiscHeaderCache,
     default_cache_path,
     discover_dolphin_tool,
 )
-from ferry.adapters.retroarch_paths import (
+from ferry.adapters.retroarch.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
 )

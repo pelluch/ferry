@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ferry.adapters.retroarch_paths import (
+from ferry.adapters.retroarch.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
     is_ra_save_file,

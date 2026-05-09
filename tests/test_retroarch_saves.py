@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ferry.adapters.retroarch_paths import RetroArchInstall
-from ferry.adapters.retroarch_saves import list_local_saves
+from ferry.adapters.retroarch.retroarch_paths import RetroArchInstall
+from ferry.adapters.retroarch.retroarch_saves import list_local_saves
 from ferry.domain.state import RomState, TransformedOutput
 
 
@@ -294,7 +294,7 @@ def test_empty_saves_dir_returns_empty(tmp_path: Path) -> None:
 def test_walker_uses_core_info_for_lowercase_emulator_label(tmp_path: Path) -> None:
     """When CoreInfoIndex is provided, dir name `Snes9x` reverses to `snes9x`
     so the emulator label matches what decky-romm-sync uploads to RomM."""
-    from ferry.adapters.retroarch_core_info import CoreInfoIndex
+    from ferry.adapters.retroarch.retroarch_core_info import CoreInfoIndex
 
     saves_dir = tmp_path / "saves"
     (saves_dir / "Snes9x").mkdir(parents=True)

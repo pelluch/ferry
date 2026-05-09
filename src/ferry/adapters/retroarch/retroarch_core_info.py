@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ferry.adapters.retroarch_paths import RetroArchInstall
+from ferry.adapters.retroarch.retroarch_paths import RetroArchInstall
 
 logger = logging.getLogger(__name__)
 

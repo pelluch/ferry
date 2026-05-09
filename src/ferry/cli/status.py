@@ -16,17 +16,17 @@ from pathlib import Path
 import click
 
 from ferry import __version__
-from ferry.adapters.dolphin_paths import (
+from ferry.adapters.dolphin.dolphin_paths import (
     DolphinInstall,
     discover_dolphin_installs,
 )
 from ferry.adapters.esde_paths import ESDEInstall, discover_esde_installs
-from ferry.adapters.retroarch_core_info import CoreInfoIndex
-from ferry.adapters.retroarch_paths import (
+from ferry.adapters.retroarch.retroarch_core_info import CoreInfoIndex
+from ferry.adapters.retroarch.retroarch_paths import (
     RetroArchInstall,
     discover_retroarch_installs,
 )
-from ferry.adapters.retroarch_saves import list_local_saves as list_ra_local_saves
+from ferry.adapters.retroarch.retroarch_saves import list_local_saves as list_ra_local_saves
 from ferry.adapters.state_store import default_state_path, load_state
 from ferry.cli._utils import format_bytes, mask_token, path_status
 from ferry.config import ConfigError, load_config

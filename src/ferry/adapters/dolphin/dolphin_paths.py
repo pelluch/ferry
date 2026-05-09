@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ferry.adapters.dolphin_config import (
+from ferry.adapters.dolphin.dolphin_config import (
     DolphinSettings,
     MemcardMode,
     parse_dolphin_ini,

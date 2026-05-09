@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ferry.adapters.retroarch_config import RetroArchSaveSettings, parse_retroarch_cfg
+from ferry.adapters.retroarch.retroarch_config import RetroArchSaveSettings, parse_retroarch_cfg
 from ferry.domain.install_selection import select_active
 
 logger = logging.getLogger(__name__)
