@@ -35,6 +35,7 @@ from ferry.adapters.state_store import (
     load_state,
     save_state,
 )
+from ferry.cli._utils import DEFAULT_PREVIEW
 from ferry.config import ConfigError, load_config
 from ferry.config.schema import Config
 from ferry.domain.platforms import resolve_platform_dir
@@ -333,8 +334,6 @@ def _adopt_name_only(
 # Output rendering
 # ---------------------------------------------------------------------------
 
-_PREVIEW_CAP = 20
-
 
 def _print_summary(
     *,
@@ -368,35 +367,35 @@ def _print_summary(
     if confident:
         click.echo("")
         click.echo(f"Confident matches ({len(confident)}):")
-        shown = confident[:_PREVIEW_CAP]
+        shown = confident[:DEFAULT_PREVIEW]
         for c in shown:
             click.echo(f"  ✓ {c.orphan.rel_path} → {c.match.rom_name} (rom_id={c.match.rom_id})")
-        if len(confident) > _PREVIEW_CAP:
-            click.echo(f"  ... and {len(confident) - _PREVIEW_CAP} more")
+        if len(confident) > DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(confident) - DEFAULT_PREVIEW} more")
 
     if name_only_singular:
         click.echo("")
         sigil = "✓" if include_name_only else "?"
         click.echo(f"Name-only matches ({len(name_only_singular)}):")
-        for c in name_only_singular[:_PREVIEW_CAP]:
+        for c in name_only_singular[:DEFAULT_PREVIEW]:
             click.echo(
                 f"  {sigil} {c.orphan.rel_path} → matches name of "
                 f"{c.candidates[0].rom_name} (rom_id={c.candidates[0].rom_id}) "
                 f"but local hash {c.local_md5 or '(unhashable)'} != server md5"
             )
-        if len(name_only_singular) > _PREVIEW_CAP:
-            click.echo(f"  ... and {len(name_only_singular) - _PREVIEW_CAP} more")
+        if len(name_only_singular) > DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(name_only_singular) - DEFAULT_PREVIEW} more")
 
     if name_only_ambig:
         click.echo("")
         click.echo(
             f"Name-only ambiguous ({len(name_only_ambig)}) — name matches multiple RomM rom_ids:"
         )
-        for c in name_only_ambig[:_PREVIEW_CAP]:
+        for c in name_only_ambig[:DEFAULT_PREVIEW]:
             ids = sorted({m.rom_id for m in c.candidates})
             click.echo(f"  ⚠ {c.orphan.rel_path} → rom_ids {ids}")
-        if len(name_only_ambig) > _PREVIEW_CAP:
-            click.echo(f"  ... and {len(name_only_ambig) - _PREVIEW_CAP} more")
+        if len(name_only_ambig) > DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(name_only_ambig) - DEFAULT_PREVIEW} more")
 
     if hash_only:
         click.echo("")
@@ -404,28 +403,28 @@ def _print_summary(
             f"Hash-only matches ({len(hash_only)}) — bytes match RomM but "
             "filename differs (locally renamed):"
         )
-        for c in hash_only[:_PREVIEW_CAP]:
+        for c in hash_only[:DEFAULT_PREVIEW]:
             click.echo(
                 f"  ↻ {c.orphan.rel_path} → matches hash of "
                 f"{c.candidates[0].rom_name} (rom_id={c.candidates[0].rom_id}, "
                 f"server file_name={c.candidates[0].file_name!r})"
             )
-        if len(hash_only) > _PREVIEW_CAP:
-            click.echo(f"  ... and {len(hash_only) - _PREVIEW_CAP} more")
+        if len(hash_only) > DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(hash_only) - DEFAULT_PREVIEW} more")
 
     if ambiguous:
         click.echo("")
         click.echo(f"Ambiguous ({len(ambiguous)}) — name + hash match multiple rom_ids:")
-        for c in ambiguous[:_PREVIEW_CAP]:
+        for c in ambiguous[:DEFAULT_PREVIEW]:
             ids = sorted({m.rom_id for m in c.matches})
             click.echo(f"  ⚠ {c.orphan.rel_path} → rom_ids {ids}")
-        if len(ambiguous) > _PREVIEW_CAP:
-            click.echo(f"  ... and {len(ambiguous) - _PREVIEW_CAP} more")
+        if len(ambiguous) > DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(ambiguous) - DEFAULT_PREVIEW} more")
 
     if no_match:
         click.echo("")
         click.echo(f"No match ({len(no_match)}) — not present in RomM:")
-        for c in no_match[:_PREVIEW_CAP]:
+        for c in no_match[:DEFAULT_PREVIEW]:
             click.echo(f"  - {c.orphan.rel_path}")
-        if len(no_match) > _PREVIEW_CAP:
-            click.echo(f"  ... and {len(no_match) - _PREVIEW_CAP} more")
+        if len(no_match) > DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(no_match) - DEFAULT_PREVIEW} more")

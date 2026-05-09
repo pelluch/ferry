@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Literal
 
 from ferry.adapters.retroarch_config import RetroArchSaveSettings, parse_retroarch_cfg
+from ferry.domain.install_selection import select_active
 
 logger = logging.getLogger(__name__)
 
@@ -166,27 +167,11 @@ def _core_info_candidates(
 def select_active_install(installs: list[RetroArchInstall]) -> RetroArchInstall | None:
     """Pick the RetroArch install ferry should sync from, or None if ambiguous.
 
-    Decision table:
-      - 0 installs → None.
-      - 1 install → that one.
-      - 2+ installs:
-        - Exactly one has `has_saves=True` → that one (active use signal).
-        - 0 have saves → first by priority order (nothing to sync; pick any).
-        - 2+ have saves → None (ambiguous; caller should ask the user).
-
-    Returning None on ambiguity is the safe default — uploading saves from
-    the wrong install would polish off the wrong copy at conflict time.
+    Active-use signal: an install with files in its `savefile_directory`.
+    See `domain.install_selection.select_active` for the full decision
+    table.
     """
-    if not installs:
-        return None
-    if len(installs) == 1:
-        return installs[0]
-    with_saves = [i for i in installs if i.has_saves]
-    if len(with_saves) == 1:
-        return with_saves[0]
-    if not with_saves:
-        return installs[0]  # priority-order fallback; nothing at risk
-    return None  # ambiguous
+    return select_active(installs, has_active=lambda i: i.has_saves)
 
 
 # Save-file extensions we count as evidence of active RetroArch use, AND

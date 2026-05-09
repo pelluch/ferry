@@ -16,21 +16,19 @@ trash older than the configured retention is removed.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from ferry.domain.user_dirs import state_dir
+
 logger = logging.getLogger(__name__)
 
 
 def default_trash_root(env: Mapping[str, str] | None = None) -> Path:
-    """Resolve the canonical trash directory, honoring XDG_STATE_HOME."""
-    env = env if env is not None else os.environ
-    base = env.get("XDG_STATE_HOME")
-    root = Path(base) if base else Path.home() / ".local" / "state"
-    return root / "ferry" / "trash"
+    """Resolve the canonical trash directory."""
+    return state_dir(env) / "ferry" / "trash"
 
 
 def trash_paths(

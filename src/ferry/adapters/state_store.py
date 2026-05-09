@@ -21,6 +21,7 @@ from ferry.domain.state import (
     from_json,
     to_json,
 )
+from ferry.domain.user_dirs import state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +35,8 @@ __all__ = [
 
 
 def default_state_path(env: Mapping[str, str] | None = None) -> Path:
-    """Resolve the canonical state.json path, honoring XDG_STATE_HOME."""
-    env = env if env is not None else os.environ
-    base = env.get("XDG_STATE_HOME")
-    root = Path(base) if base else Path.home() / ".local" / "state"
-    return root / "ferry" / "state.json"
+    """Resolve the canonical state.json path."""
+    return state_dir(env) / "ferry" / "state.json"
 
 
 def load_state(path: Path | None = None, env: Mapping[str, str] | None = None) -> LibraryState:

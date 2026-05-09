@@ -25,13 +25,13 @@ warnings; they don't abort the walk.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import Iterable
 from pathlib import Path
 
 from ferry.adapters.dolphin_paths import DolphinInstall, RegionEncoding
 from ferry.adapters.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
+from ferry.domain.hashing import md5_file
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.save_local import LocalSave
 from ferry.domain.state import RomState
@@ -42,7 +42,6 @@ __all__ = ("LocalSave", "list_local_saves", "lookup_disc_header", "resolve_save_
 
 logger = logging.getLogger(__name__)
 
-_HASH_BLOCK_SIZE = 64 * 1024
 _GAMECUBE_PLATFORM_DIR = "gc"
 _DOLPHIN_EMULATOR_LABEL = "dolphin"
 
@@ -126,7 +125,7 @@ def list_local_saves(
                 continue
             try:
                 stat = path.stat()
-                local_md5 = _md5_of_file(path)
+                local_md5 = md5_file(path)
             except OSError as exc:
                 warnings.append(f"rom_id={rom.rom_id}: could not read {path}: {exc}")
                 continue
@@ -207,11 +206,3 @@ def _slot_from_filename(filename: str, prefix: str) -> str | None:
     if not filename.startswith(prefix):
         return None
     return filename[len(prefix) : -len(".gci")]
-
-
-def _md5_of_file(path: Path) -> str:
-    md5 = hashlib.md5()
-    with path.open("rb") as f:
-        while chunk := f.read(_HASH_BLOCK_SIZE):
-            md5.update(chunk)
-    return md5.hexdigest()

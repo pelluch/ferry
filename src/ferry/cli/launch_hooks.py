@@ -22,9 +22,12 @@ from ferry.adapters.esde_paths import (
 )
 from ferry.config import ConfigError, load_config
 from ferry.config.schema import LaunchHooksConfig
+from ferry.domain.user_dirs import state_dir
 from ferry.services.launch_hooks import (
+    DriftKind,
     HookStatus,
     WrapperConfig,
+    classify_drift,
     default_snapshot_path,
     default_wrapper_path,
     delete_snapshot,
@@ -195,46 +198,38 @@ def uninstall_launch_hooks(ctx: click.Context, profile: str | None) -> None:
     click.echo("Restart ES-DE so it re-reads custom_systems and uses bundled commands again.")
 
 
+_INSTALL_DRY_RUN_MESSAGES: dict[DriftKind, str] = {
+    DriftKind.NO_SNAPSHOT: "no snapshot — clean install (would write fresh snapshot)",
+    DriftKind.CLEAN: "✓ snapshot matches disk — re-running is a no-op",
+    DriftKind.UPSTREAM_AND_LOCAL_DRIFT: (
+        "⚠ bundled file changed AND managed block edited — "
+        "real run requires --force (clobbers local edits)"
+    ),
+    DriftKind.UPSTREAM_DRIFT: (
+        "⚠ bundled file changed — real run rebuilds managed block from new bundled"
+    ),
+    DriftKind.LOCAL_DRIFT: (
+        "⚠ managed block edited locally — real run requires --force (clobbers your edits)"
+    ),
+    DriftKind.BUNDLED_MISSING: (
+        "⚠ bundled file from snapshot is missing — real run "
+        "rebuilds against the currently-discovered bundled file"
+    ),
+    DriftKind.BLOCK_REMOVED: "⚠ managed block was removed since install — real run re-adds it",
+}
+
+
 def _print_install_drift_preview(drift: HookStatus | None) -> None:
     """Tell the user what the snapshot vs disk look like in dry-run.
 
-    Mirrors the `status`-side rendering (`format_hook_status_line`) so the
-    dry-run preview describes the same drift state the user would see in
-    `ferry status` if they ran it instead.
+    Mirrors the `status`-side rendering so the dry-run preview describes
+    the same drift state the user would see in `ferry status` if they
+    ran it instead.
     """
-    if drift is None:
-        click.echo("Drift status: no snapshot — clean install (would write fresh snapshot)")
-        return
-    if drift.is_clean:
-        click.echo("Drift status: ✓ snapshot matches disk — re-running is a no-op")
-        return
-    if drift.upstream_drift and drift.local_drift:
-        click.echo(
-            "Drift status: ⚠ bundled file changed AND managed block edited — "
-            "real run requires --force (clobbers local edits)"
-        )
-        return
-    if drift.upstream_drift:
-        click.echo(
-            "Drift status: ⚠ bundled file changed — real run rebuilds managed "
-            "block from new bundled"
-        )
-        return
-    if drift.local_drift:
-        click.echo(
-            "Drift status: ⚠ managed block edited locally — real run requires "
-            "--force (clobbers your edits)"
-        )
-        return
-    if not drift.bundled_present:
-        click.echo(
-            "Drift status: ⚠ bundled file from snapshot is missing — real run "
-            "rebuilds against the currently-discovered bundled file"
-        )
-        return
-    if not drift.block_present:
-        click.echo("Drift status: ⚠ managed block was removed since install — real run re-adds it")
-        return
+    kind = classify_drift(drift)
+    message = _INSTALL_DRY_RUN_MESSAGES.get(kind)
+    if message is not None:
+        click.echo(f"Drift status: {message}")
 
 
 def _select_install(profile: str | None) -> ESDEInstall:
@@ -261,14 +256,10 @@ def _select_install(profile: str | None) -> ESDEInstall:
 
 
 def _resolve_log_path(launch_hooks_cfg: LaunchHooksConfig) -> Path:
-    """Default to `$XDG_STATE_HOME/ferry/launch.log` when no override."""
+    """Default to `<state_dir>/ferry/launch.log` when no override."""
     if launch_hooks_cfg.log_path is not None:
         return launch_hooks_cfg.log_path
-    import os
-
-    base = os.environ.get("XDG_STATE_HOME")
-    root = Path(base) if base else Path.home() / ".local" / "state"
-    return root / "ferry" / "launch.log"
+    return state_dir() / "ferry" / "launch.log"
 
 
 def _resolve_ferry_bin() -> Path:

@@ -21,7 +21,7 @@ from ferry.domain.destination import Destination
 from ferry.domain.state import LibraryState, RomState
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AddAction:
     """A ROM in RomM that ferry has never seen before."""
 
@@ -32,7 +32,7 @@ class AddAction:
     reason: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class UpdateAction:
     """A ROM ferry has, but RomM's `updated_at` has moved since we last synced."""
 
@@ -44,7 +44,7 @@ class UpdateAction:
     reason: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DeleteAction:
     """A ROM in stored state that's no longer in the configured collection."""
 
@@ -55,7 +55,7 @@ class DeleteAction:
     reason: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SyncPlan:
     to_add: list[AddAction]
     to_update: list[UpdateAction]

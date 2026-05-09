@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from ferry.domain.install_selection import select_active
+
 logger = logging.getLogger(__name__)
 
 ESDESource = Literal["retrodeck-flatpak", "native"]
@@ -148,23 +150,9 @@ def _resolve_bundled(source: ESDESource, probe: Path) -> Path | None:
 def select_active_install(installs: list[ESDEInstall]) -> ESDEInstall | None:
     """Pick the ES-DE install ferry should target, or None if ambiguous.
 
-    Decision table (mirrors the RetroArch / Dolphin selectors):
-      - 0 installs → None.
-      - 1 install → that one.
-      - 2+ installs:
-        - Exactly one has `has_custom_systems_file=True` → that one
-          (sign that the user actually uses it).
-        - 0 with custom file → first by priority order (RetroDECK).
-        - 2+ with custom file → None (caller asks the user via config
-          override).
+    Active-use signal: a present `custom_systems.xml` (the user has
+    customised this profile). See
+    `domain.install_selection.select_active` for the full decision
+    table.
     """
-    if not installs:
-        return None
-    if len(installs) == 1:
-        return installs[0]
-    with_custom = [i for i in installs if i.has_custom_systems_file]
-    if len(with_custom) == 1:
-        return with_custom[0]
-    if not with_custom:
-        return installs[0]
-    return None
+    return select_active(installs, has_active=lambda i: i.has_custom_systems_file)

@@ -1,8 +1,7 @@
-from pathlib import Path
-
 import click
 
 from ferry.adapters.detect import DetectedCandidate, detect_candidates
+from ferry.cli._utils import path_status
 from ferry.domain.destination import PRESETS
 
 
@@ -35,11 +34,11 @@ def detect() -> None:
 
 def _print_candidate(c: DetectedCandidate) -> None:
     click.echo(f"  {c.preset}")
-    click.echo(f"    ROMs:    {c.roms_base} {_status(c.roms_base)}")
+    click.echo(f"    ROMs:    {c.roms_base} {path_status(c.roms_base)}")
     if c.bios_base is None:
         click.echo("    BIOS:    (per-emulator — no centralized BIOS root)")
     else:
-        click.echo(f"    BIOS:    {c.bios_base} {_status(c.bios_base)}")
+        click.echo(f"    BIOS:    {c.bios_base} {path_status(c.bios_base)}")
     click.echo("    Signals:")
     for sig in c.signals:
         click.echo(f"      - {sig}")
@@ -57,11 +56,3 @@ def _print_no_candidates() -> None:
     click.echo('    # bios_base = "/path/to/bios"   # optional')
     click.echo("")
     click.echo(f"Or pick a known preset: {known}")
-
-
-def _status(path: Path) -> str:
-    if not path.exists():
-        return "(missing)"
-    if not path.is_dir():
-        return "(not a directory)"
-    return "(exists)"

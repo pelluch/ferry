@@ -13,12 +13,13 @@ the surface this module exposes plus the validators that guard it.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from datetime import datetime, timedelta
 from importlib import resources
 from pathlib import Path
+
+from ferry.domain.user_dirs import config_dir
 
 # Floor for periodic sync cadence. RomM library updates are not real-time,
 # typical sync runs take seconds, and the only thing a faster cadence buys
@@ -48,10 +49,8 @@ class SystemdUnavailableError(RuntimeError):
 
 
 def default_units_dir() -> Path:
-    """`~/.config/systemd/user/` — the canonical user-units directory."""
-    base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / "systemd" / "user"
+    """Resolve the canonical user-units directory."""
+    return config_dir() / "systemd" / "user"
 
 
 def systemd_user_available() -> bool:

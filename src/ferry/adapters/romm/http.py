@@ -29,6 +29,7 @@ from ferry.adapters.romm.errors import (
     RommTimeoutError,
 )
 from ferry.config import RommConfig
+from ferry.domain.hashing import CHUNK_SIZE
 
 DEFAULT_CONNECT_TIMEOUT = 30.0
 DEFAULT_READ_TIMEOUT = 60.0
@@ -39,10 +40,9 @@ DEFAULT_DOWNLOAD_TIMEOUT = httpx.Timeout(
     write=DEFAULT_READ_TIMEOUT,
     pool=DEFAULT_CONNECT_TIMEOUT,
 )
-_DOWNLOAD_BLOCK_SIZE = 64 * 1024
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DownloadResult:
     """Outcome of a successful download — what's now on disk."""
 
@@ -225,7 +225,7 @@ class RommHttpAdapter:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = dest_path.with_name(dest_path.name + ".part")
 
-        md5 = hashlib.md5()
+        md5 = hashlib.md5(usedforsecurity=False)
         size = 0
         try:
             with self._client.stream("GET", path) as response:
@@ -236,7 +236,7 @@ class RommHttpAdapter:
 
                 advertised_total = self._content_length(response)
                 with tmp_path.open("wb") as f:
-                    for chunk in response.iter_bytes(chunk_size=_DOWNLOAD_BLOCK_SIZE):
+                    for chunk in response.iter_bytes(chunk_size=CHUNK_SIZE):
                         if not chunk:
                             continue
                         f.write(chunk)

@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from ferry.domain.user_dirs import cache_dir
+
 logger = logging.getLogger(__name__)
 
 DolphinToolSource = Literal[
@@ -272,11 +274,8 @@ def _running_in_retrodeck_sandbox(flatpak_info_path: Path) -> bool:
 
 
 def default_cache_path(env: Mapping[str, str] | None = None) -> Path:
-    """`$XDG_CACHE_HOME/ferry/dolphin-headers.json`, default `~/.cache/...`."""
-    env = env if env is not None else os.environ
-    base = env.get("XDG_CACHE_HOME")
-    root = Path(base) if base else Path.home() / ".cache"
-    return root / "ferry" / "dolphin-headers.json"
+    """Resolve the dolphin-headers cache path under the user's cache dir."""
+    return cache_dir(env) / "ferry" / "dolphin-headers.json"
 
 
 class DiscHeaderCache:

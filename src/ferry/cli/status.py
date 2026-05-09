@@ -32,12 +32,15 @@ from ferry.adapters.retroarch_paths import (
 )
 from ferry.adapters.retroarch_saves import list_local_saves as list_ra_local_saves
 from ferry.adapters.state_store import default_state_path, load_state
+from ferry.cli._utils import format_bytes, mask_token, path_status
 from ferry.config import ConfigError, load_config
 from ferry.config.schema import Config
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.state import LibraryState, RomState
 from ferry.services.launch_hooks import (
+    DriftKind,
     HookStatus,
+    classify_drift,
     default_snapshot_path,
     detect_drift,
     extract_managed_block,
@@ -77,7 +80,7 @@ def status(ctx: click.Context, show_all: bool) -> None:
     click.echo("")
     click.echo("[romm]")
     click.echo(f"  url:         {config.romm.url}")
-    click.echo(f"  api_key:     {_mask(config.romm.api_key)}")
+    click.echo(f"  api_key:     {mask_token(config.romm.api_key)}")
 
     click.echo("")
     click.echo("[sync]")
@@ -97,11 +100,11 @@ def status(ctx: click.Context, show_all: bool) -> None:
     else:
         d = config.destination
         click.echo(f"  preset:      {d.preset or '(custom)'}")
-        click.echo(f"  roms_base:   {d.roms_base} {_path_status(d.roms_base)}")
+        click.echo(f"  roms_base:   {d.roms_base} {path_status(d.roms_base)}")
         if d.bios_base is None:
             click.echo("  bios_base:   (per-emulator)")
         else:
-            click.echo(f"  bios_base:   {d.bios_base} {_path_status(d.bios_base)}")
+            click.echo(f"  bios_base:   {d.bios_base} {path_status(d.bios_base)}")
 
     click.echo("")
     click.echo("[saves]")
@@ -265,6 +268,38 @@ def _print_esde_status() -> None:
         click.echo(f"    hooks:     {_describe_hook_status(install, drift)}")
 
 
+_STATUS_MESSAGES: dict[DriftKind, str] = {
+    DriftKind.CLEAN: "✓ installed and in sync",
+    DriftKind.NO_SNAPSHOT: (
+        "not installed (run `ferry install-launch-hooks` for per-launch save sync)"
+    ),
+    DriftKind.BLOCK_PRESENT_NO_SNAPSHOT: (
+        "managed block present but no drift snapshot — "
+        "re-run `ferry install-launch-hooks` to enable drift detection"
+    ),
+    DriftKind.SNAPSHOT_FOR_OTHER_INSTALL: (
+        "not installed for this profile (snapshot belongs to another install)"
+    ),
+    DriftKind.UPSTREAM_AND_LOCAL_DRIFT: (
+        "⚠ bundled changed AND managed block edited locally "
+        "(resolve manually — re-running with --force clobbers edits)"
+    ),
+    DriftKind.UPSTREAM_DRIFT: "⚠ bundled changed (re-run `ferry install-launch-hooks`)",
+    DriftKind.LOCAL_DRIFT: (
+        "⚠ managed block edited locally "
+        "(re-running `ferry install-launch-hooks` clobbers edits unless --force)"
+    ),
+    DriftKind.BUNDLED_MISSING: (
+        "⚠ bundled file from snapshot is missing (re-run `ferry install-launch-hooks` to refresh)"
+    ),
+    DriftKind.BLOCK_REMOVED: (
+        "⚠ managed block was removed "
+        "(re-run `ferry install-launch-hooks` to reinstate, "
+        "or `uninstall-launch-hooks` to clear)"
+    ),
+}
+
+
 def _describe_hook_status(install: ESDEInstall, drift: HookStatus | None) -> str:
     """Single-line summary of launch-hooks state for one install.
 
@@ -273,46 +308,12 @@ def _describe_hook_status(install: ESDEInstall, drift: HookStatus | None) -> str
     `custom_systems_xml` matches the snapshot's path — other discovered
     installs that don't match get a "not installed" line.
     """
-    if drift is None:
-        if extract_managed_block(install.custom_systems_xml) is not None:
-            # Managed block exists but no snapshot — likely an upgrade from
-            # pre-ck3c ferry. Re-run regenerates the snapshot for free.
-            return (
-                "managed block present but no drift snapshot — "
-                "re-run `ferry install-launch-hooks` to enable drift detection"
-            )
-        return "not installed (run `ferry install-launch-hooks` for per-launch save sync)"
-
-    if drift.snapshot.custom_systems_path != install.custom_systems_xml:
-        # Snapshot is for a different install — this one isn't wired up.
-        return "not installed for this profile (snapshot belongs to another install)"
-
-    if drift.is_clean:
-        return "✓ installed and in sync"
-    if drift.upstream_drift and drift.local_drift:
-        return (
-            "⚠ bundled changed AND managed block edited locally "
-            "(resolve manually — re-running with --force clobbers edits)"
-        )
-    if drift.upstream_drift:
-        return "⚠ bundled changed (re-run `ferry install-launch-hooks`)"
-    if drift.local_drift:
-        return (
-            "⚠ managed block edited locally "
-            "(re-running `ferry install-launch-hooks` clobbers edits unless --force)"
-        )
-    if not drift.bundled_present:
-        return (
-            "⚠ bundled file from snapshot is missing "
-            "(re-run `ferry install-launch-hooks` to refresh)"
-        )
-    if not drift.block_present:
-        return (
-            "⚠ managed block was removed "
-            "(re-run `ferry install-launch-hooks` to reinstate, "
-            "or `uninstall-launch-hooks` to clear)"
-        )
-    return "✓ installed and in sync"  # defensive — every case above covers actual states
+    kind = classify_drift(
+        drift,
+        custom_systems_path=install.custom_systems_xml,
+        block_present=extract_managed_block(install.custom_systems_xml) is not None,
+    )
+    return _STATUS_MESSAGES[kind]
 
 
 # Stem-suffix pattern matching RetroDECK's SRM backup convention:
@@ -490,29 +491,5 @@ def _print_trash_summary(trash_root: Path) -> None:
         click.echo(
             f"trash:         {trash_root} "
             f"({len(entries)} entr{'y' if len(entries) == 1 else 'ies'}, "
-            f"{_format_bytes(total_bytes)}{age_str})"
+            f"{format_bytes(total_bytes)}{age_str})"
         )
-
-
-def _path_status(path: Path) -> str:
-    if not path.exists():
-        return "(missing)"
-    if not path.is_dir():
-        return "(not a directory)"
-    return "(exists)"
-
-
-def _mask(token: str) -> str:
-    if len(token) <= 6:
-        return "(set)"
-    return f"{token[:4]}…{token[-3:]}"
-
-
-def _format_bytes(n: int) -> str:
-    units = ("B", "KB", "MB", "GB", "TB")
-    size = float(n)
-    for unit in units:
-        if size < 1024 or unit == units[-1]:
-            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
-        size /= 1024
-    return f"{int(n)} B"

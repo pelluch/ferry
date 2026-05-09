@@ -33,6 +33,7 @@ from ferry.adapters.state_store import (
     load_state,
     save_state,
 )
+from ferry.cli._utils import DEFAULT_PREVIEW
 from ferry.config import ConfigError, SavesConfig, SyncConfig, load_config
 from ferry.config.schema import Config
 from ferry.domain.platforms import resolve_platform_dir
@@ -72,9 +73,6 @@ logger = logging.getLogger(__name__)
 # all `_prepare_save_backends` / `_run_*` helpers operate on it
 # uniformly. Concrete backends (RetroArch + Dolphin) are constructed
 # in `_prepare_save_backends` and stored as `list[SaveBackend]`.
-
-# How many entries per section to print before truncating with "... and N more".
-_DEFAULT_PREVIEW = 20
 
 
 @click.command()
@@ -526,7 +524,7 @@ def _print_save_plan(plan: SavePlan, *, full: bool) -> None:
         return
     click.echo("  " + ", ".join(summary))
 
-    cap = None if full else _DEFAULT_PREVIEW
+    cap = None if full else DEFAULT_PREVIEW
     _print_planned_actions("  Would upload", plan.to_upload, "↑", cap)
     _print_planned_actions("  Would download", plan.to_download, "↓", cap)
     if plan.ambiguous:
@@ -762,7 +760,7 @@ def _run_save_sync(
     rom: RomState | None = None,
 ) -> None:
     """Run save sync and print a summary block in the existing layout."""
-    label = "RetroArch" if isinstance(backend, RetroArchSaveBackend) else "Dolphin"
+    label = backend.backend_label
     click.echo("")
     if rom is not None:
         click.echo(f"Syncing {label} saves for {rom.name}…")
@@ -793,12 +791,12 @@ def _print_save_sync_summary(result: SaveSyncResult, *, label: str = "Save") -> 
     if result.ambiguous:
         click.echo("")
         click.echo("Ambiguous (within tolerance — skipped, will re-evaluate next sync):")
-        for line in result.ambiguous[:_DEFAULT_PREVIEW]:
+        for line in result.ambiguous[:DEFAULT_PREVIEW]:
             click.echo(f"  · {line}")
     if result.failed:
         click.echo("")
         click.echo("Failed:")
-        for line in result.failed[:_DEFAULT_PREVIEW]:
+        for line in result.failed[:DEFAULT_PREVIEW]:
             click.echo(f"  ✗ {line}")
     if result.warnings:
         # Walker warnings (unmatched filenames) are routine; don't shout.
@@ -918,7 +916,7 @@ def _print_plan_summary(plan: SyncPlan) -> None:
 def _print_plan(plan: SyncPlan, *, full: bool, config: Config) -> None:
     _print_plan_summary(plan)
 
-    cap = None if full else _DEFAULT_PREVIEW
+    cap = None if full else DEFAULT_PREVIEW
     _print_section("To add", plan.to_add, "+", cap, config)
     _print_section("To update", plan.to_update, "↻", cap, config)
 
@@ -998,7 +996,7 @@ def _print_execution_summary(plan: SyncPlan, result: ExecutionResult) -> None:
     if result.deleted:
         click.echo("")
         click.echo("Trashed ROMs (recoverable until retention expires):")
-        for d in result.deleted[:_DEFAULT_PREVIEW]:
+        for d in result.deleted[:DEFAULT_PREVIEW]:
             click.echo(f"  - {d.name} ({d.platform_slug}, rom_id={d.rom_id}) → {d.trash_dir}")
-        if len(result.deleted) > _DEFAULT_PREVIEW:
-            click.echo(f"  ... and {len(result.deleted) - _DEFAULT_PREVIEW} more")
+        if len(result.deleted) > DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(result.deleted) - DEFAULT_PREVIEW} more")

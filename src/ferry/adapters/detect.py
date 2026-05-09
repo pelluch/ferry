@@ -4,7 +4,7 @@ from pathlib import Path
 from ferry.domain.destination import resolve_preset
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DetectedCandidate:
     """A preset that the local filesystem suggests is in use.
 
@@ -52,7 +52,9 @@ def _probe_retrodeck_flatpak(home: Path) -> DetectedCandidate | None:
     if not signals:
         return None
     roms, bios = resolve_preset("retrodeck-flatpak", home)
-    return DetectedCandidate("retrodeck-flatpak", roms, bios, signals)
+    return DetectedCandidate(
+        preset="retrodeck-flatpak", roms_base=roms, bios_base=bios, signals=signals
+    )
 
 
 def _probe_emudeck(home: Path) -> DetectedCandidate | None:
@@ -64,7 +66,7 @@ def _probe_emudeck(home: Path) -> DetectedCandidate | None:
     if not signals:
         return None
     roms, bios = resolve_preset("emudeck", home)
-    return DetectedCandidate("emudeck", roms, bios, signals)
+    return DetectedCandidate(preset="emudeck", roms_base=roms, bios_base=bios, signals=signals)
 
 
 def _probe_esde_native(home: Path) -> DetectedCandidate | None:
@@ -75,10 +77,10 @@ def _probe_esde_native(home: Path) -> DetectedCandidate | None:
         return None
     roms, bios = resolve_preset("esde-native", home)
     return DetectedCandidate(
-        "esde-native",
-        roms,
-        bios,
-        [
+        preset="esde-native",
+        roms_base=roms,
+        bios_base=bios,
+        signals=[
             "ROM dir present (~/ROMs)",
             "ES-DE userdata dir present (~/ES-DE/settings/es_settings.xml)",
         ],
@@ -92,10 +94,10 @@ def _probe_esde_flatpak(home: Path) -> DetectedCandidate | None:
         return None
     roms, bios = resolve_preset("esde-flatpak", home)
     return DetectedCandidate(
-        "esde-flatpak",
-        roms,
-        bios,
-        [
+        preset="esde-flatpak",
+        roms_base=roms,
+        bios_base=bios,
+        signals=[
             "ROM dir present (~/ROMs)",
             "ES-DE flatpak data dir present (~/.var/app/org.es_de.frontend)",
         ],

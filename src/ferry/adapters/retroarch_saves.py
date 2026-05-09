@@ -28,13 +28,13 @@ v2 we accept the reduced label and document it.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections.abc import Iterable
 from pathlib import Path
 
 from ferry.adapters.retroarch_core_info import CoreInfoIndex
 from ferry.adapters.retroarch_paths import RetroArchInstall, is_ra_save_file
+from ferry.domain.hashing import md5_file
 from ferry.domain.save_local import LocalSave
 from ferry.domain.state import RomState
 
@@ -43,8 +43,6 @@ from ferry.domain.state import RomState
 __all__ = ("LocalSave", "list_local_saves")
 
 logger = logging.getLogger(__name__)
-
-_HASH_BLOCK_SIZE = 64 * 1024
 
 
 def list_local_saves(
@@ -99,7 +97,7 @@ def list_local_saves(
         )
         try:
             stat = path.stat()
-            local_md5 = _md5_of_file(path)
+            local_md5 = md5_file(path)
         except OSError as exc:
             warnings.append(f"could not read save {str(rel)!r}: {exc}")
             continue
@@ -179,11 +177,3 @@ def _build_stem_index(roms: Iterable[RomState]) -> dict[str, RomState]:
         for output in rom.outputs:
             index[Path(output.path).stem] = rom
     return index
-
-
-def _md5_of_file(path: Path) -> str:
-    md5 = hashlib.md5()
-    with path.open("rb") as f:
-        while chunk := f.read(_HASH_BLOCK_SIZE):
-            md5.update(chunk)
-    return md5.hexdigest()

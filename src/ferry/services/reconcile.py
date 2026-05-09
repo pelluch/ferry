@@ -30,18 +30,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ferry.adapters.orphan_hash import hash_file_bytes, hash_orphan_file
+from ferry.domain.iso_time import now_iso as _now_iso
 from ferry.domain.rom_files import resolve_local_filename
 from ferry.domain.state import LibraryState, RomState, TransformedOutput
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class OrphanCandidate:
     """A local file not present in state.roms — a reconcile candidate."""
 
@@ -50,7 +50,7 @@ class OrphanCandidate:
     platform_dir: str  # the immediate dir name under roms_base
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class MatchedFile:
     """One (rom, file) pair in RomM that matched an orphan."""
 
@@ -63,7 +63,7 @@ class MatchedFile:
     file_data: dict[str, Any]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Confident:
     """Name AND hash both match a single rom — safe to adopt."""
 
@@ -72,7 +72,7 @@ class Confident:
     local_md5: str  # the matching md5 (largest-inner-file convention)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class NameOnly:
     """Filename matches RomM but hash doesn't."""
 
@@ -81,7 +81,7 @@ class NameOnly:
     local_md5: str | None  # may be None if hashing failed
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class HashOnly:
     """Hash matches RomM but filename doesn't (renamed local file)."""
 
@@ -90,7 +90,7 @@ class HashOnly:
     local_md5: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Ambiguous:
     """Name+hash match, but multiple distinct rom_ids — can't adopt."""
 
@@ -99,7 +99,7 @@ class Ambiguous:
     local_md5: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class NoMatch:
     """No name and no hash match in the platform's RomM listing."""
 
@@ -388,7 +388,3 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -16,13 +16,10 @@ retention purge lands in the delete-on-remove checkpoint.
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 
 from ferry.adapters.romm import RommApi, RommApiError
@@ -30,10 +27,14 @@ from ferry.adapters.state_store import save_state
 from ferry.config import TransformsConfig
 from ferry.config.schema import Config
 from ferry.domain.destination import Destination
+from ferry.domain.format import format_bytes
+from ferry.domain.hashing import md5_file
+from ferry.domain.iso_time import now_iso
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.rom_files import resolve_local_filename
 from ferry.domain.state import LibraryState, RomState, TransformedOutput
 from ferry.domain.sync_plan import AddAction, DeleteAction, SyncPlan, UpdateAction
+from ferry.domain.user_dirs import cache_dir
 from ferry.services.pipeline import run_pipeline
 from ferry.services.trash import trash_paths
 
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 _PRIMARY_PRIORITY = (".m3u", ".cue", ".chd", ".rvz", ".iso", ".bin", ".zip")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RomSuccess:
     rom_id: int
     name: str
@@ -55,7 +56,7 @@ class RomSuccess:
     output_paths: tuple[Path, ...]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RomFailure:
     rom_id: int
     name: str
@@ -63,7 +64,7 @@ class RomFailure:
     error: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RomDeletion:
     rom_id: int
     name: str
@@ -71,7 +72,7 @@ class RomDeletion:
     trash_dir: Path
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class ExecutionResult:
     succeeded: list[RomSuccess] = field(default_factory=list)
     failed: list[RomFailure] = field(default_factory=list)
@@ -220,7 +221,7 @@ def execute_plan(
             )
         )
         progress(
-            f"{prefix}   ✓ {_format_bytes(new_state.source_size)} → "
+            f"{prefix}   ✓ {format_bytes(new_state.source_size)} → "
             f"{absolute_outputs[0]}"
             + (f" (+ {len(absolute_outputs) - 1} more)" if len(absolute_outputs) > 1 else "")
         )
@@ -307,7 +308,7 @@ def _execute_one(
         outputs = tuple(
             TransformedOutput(
                 path=str(p.relative_to(destination.roms_base)),
-                md5=_hash_file(p),
+                md5=md5_file(p),
                 size=p.stat().st_size,
             )
             for p in pipeline_outputs
@@ -325,7 +326,7 @@ def _execute_one(
             transforms=tuple(transforms_cfg.for_platform(platform)),
             outputs=outputs,
             primary_output_index=primary_index,
-            synced_at=_now_iso(),
+            synced_at=now_iso(),
         )
         succeeded = True
         return new_state
@@ -357,14 +358,6 @@ def _cleanup_orphans(
         trash_paths(to_trash, rom_id, trash_root=trash_root, roms_base=roms_base)
 
 
-def _hash_file(path: Path) -> str:
-    md5 = hashlib.md5()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(64 * 1024), b""):
-            md5.update(chunk)
-    return md5.hexdigest()
-
-
 def _pick_primary_index(outputs: list[Path]) -> int:
     if len(outputs) == 1:
         return 0
@@ -375,23 +368,6 @@ def _pick_primary_index(outputs: list[Path]) -> int:
     return 0
 
 
-def _format_bytes(n: int) -> str:
-    units = ("B", "KB", "MB", "GB", "TB")
-    size = float(n)
-    for unit in units:
-        if size < 1024 or unit == units[-1]:
-            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
-        size /= 1024
-    return f"{int(n)} B"
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def default_scratch_root(env: os._Environ | dict[str, str] | None = None) -> Path:
-    """Resolve the canonical scratch directory under XDG_CACHE_HOME."""
-    env = env if env is not None else os.environ
-    base = env.get("XDG_CACHE_HOME")
-    root = Path(base) if base else Path.home() / ".cache"
-    return root / "ferry" / "scratch"
+def default_scratch_root(env: Mapping[str, str] | None = None) -> Path:
+    """Resolve the canonical scratch directory."""
+    return cache_dir(env) / "ferry" / "scratch"

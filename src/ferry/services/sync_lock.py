@@ -27,6 +27,8 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
+from ferry.domain.user_dirs import state_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,11 +42,8 @@ class LockHeld(Exception):
 
 
 def default_lock_path(env: Mapping[str, str] | None = None) -> Path:
-    """`$XDG_STATE_HOME/ferry/sync.lock` (default `~/.local/state/ferry/sync.lock`)."""
-    env = env if env is not None else os.environ
-    base = env.get("XDG_STATE_HOME")
-    root = Path(base) if base else Path.home() / ".local" / "state"
-    return root / "ferry" / "sync.lock"
+    """Resolve the canonical sync.lock path."""
+    return state_dir(env) / "ferry" / "sync.lock"
 
 
 @contextmanager

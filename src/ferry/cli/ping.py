@@ -1,10 +1,10 @@
 import logging
-from pathlib import Path
 
 import click
 
 from ferry import __version__
 from ferry.adapters.romm import RommApi, RommApiError, RommAuthError, RommHttpAdapter
+from ferry.cli._utils import mask_token, path_status
 from ferry.config import ConfigError, Destination, load_config
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,9 @@ def ping(ctx: click.Context) -> None:
     romm = loaded.config.romm
     click.echo(f"config:                  {loaded.config_path}")
     click.echo(f"romm.url:                {romm.url}")
-    click.echo(f"romm.api_key:            {_mask(romm.api_key)} (from {loaded.api_key_source})")
+    click.echo(
+        f"romm.api_key:            {mask_token(romm.api_key)} (from {loaded.api_key_source})"
+    )
     click.echo(f"romm.allow_insecure_ssl: {romm.allow_insecure_ssl}")
     _print_destination(loaded.config.destination)
     click.echo("")
@@ -58,28 +60,14 @@ def ping(ctx: click.Context) -> None:
         click.echo(f"    - {name} (id={coll_id}{suffix})")
 
 
-def _mask(token: str) -> str:
-    if len(token) <= 6:
-        return "(set)"
-    return f"{token[:4]}…{token[-3:]}"
-
-
 def _print_destination(dest: Destination | None) -> None:
     if dest is None:
         click.echo("destination:             (not configured — `ferry detect` for help)")
         return
     preset = dest.preset or "(custom)"
     click.echo(f"destination.preset:      {preset}")
-    click.echo(f"destination.roms_base:   {dest.roms_base} {_path_status(dest.roms_base)}")
+    click.echo(f"destination.roms_base:   {dest.roms_base} {path_status(dest.roms_base)}")
     if dest.bios_base is None:
         click.echo("destination.bios_base:   (per-emulator — no centralized BIOS root)")
     else:
-        click.echo(f"destination.bios_base:   {dest.bios_base} {_path_status(dest.bios_base)}")
-
-
-def _path_status(path: Path) -> str:
-    if not path.exists():
-        return "(missing)"
-    if not path.is_dir():
-        return "(not a directory)"
-    return "(exists)"
+        click.echo(f"destination.bios_base:   {dest.bios_base} {path_status(dest.bios_base)}")

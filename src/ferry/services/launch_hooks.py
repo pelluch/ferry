@@ -29,12 +29,18 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
+from xml.sax.saxutils import quoteattr as xml_quote_attr
+
+from ferry.domain.hashing import sha256_file
+from ferry.domain.iso_time import now_iso
+from ferry.domain.user_dirs import data_dir, state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +80,9 @@ class WrapperConfig:
     log_path: Path | None
 
 
-def default_wrapper_path(env: dict | None = None) -> Path:
-    """`$XDG_DATA_HOME/ferry/launch-hook.sh`, default `~/.local/share/ferry/...`."""
-    env = env if env is not None else os.environ
-    base = env.get("XDG_DATA_HOME")
-    root = Path(base) if base else Path.home() / ".local" / "share"
-    return root / "ferry" / _WRAPPER_FILENAME
+def default_wrapper_path(env: Mapping[str, str] | None = None) -> Path:
+    """Resolve the wrapper-script path under the user's data dir."""
+    return data_dir(env) / "ferry" / _WRAPPER_FILENAME
 
 
 def render_wrapper_script(config: WrapperConfig) -> str:
@@ -203,30 +206,20 @@ def _render_wrapped_command(command_el: ET.Element, wrapper_path: Path) -> str:
     right status).
     """
     label = command_el.get("label")
-    label_attr = f' label="{_xml_escape_attr(label)}"' if label else ""
+    label_attr = f" label={xml_quote_attr(label)}" if label else ""
     original = (command_el.text or "").strip()
     wrapper = str(wrapper_path)
     wrapped = (
         f"{_shell_quote(wrapper)} %ROM% pre ; {original} ; {_shell_quote(wrapper)} %ROM% post $?"
     )
-    return f"        <command{label_attr}>{_xml_escape_text(wrapped)}</command>"
+    return f"        <command{label_attr}>{xml_escape(wrapped)}</command>"
 
 
 def _render_simple_element(el: ET.Element, *, indent: int) -> str:
     """Serialize a leaf element (no nested children). Matches RetroDECK style."""
     pad = " " * indent
-    text = _xml_escape_text((el.text or "").strip())
+    text = xml_escape((el.text or "").strip())
     return f"{pad}<{el.tag}>{text}</{el.tag}>"
-
-
-def _xml_escape_text(s: str) -> str:
-    """Escape `&`, `<`, `>` for inclusion in element text."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _xml_escape_attr(s: str) -> str:
-    """Escape for inclusion in an attribute value (also escapes quotes)."""
-    return _xml_escape_text(s).replace('"', "&quot;")
 
 
 # ---------------------------------------------------------------------------
@@ -367,21 +360,84 @@ class HookStatus:
         )
 
 
-def default_snapshot_path(env: dict | None = None) -> Path:
-    """`$XDG_STATE_HOME/ferry/launch-hooks.snapshot.json`."""
-    env = env if env is not None else os.environ
-    base = env.get("XDG_STATE_HOME")
-    root = Path(base) if base else Path.home() / ".local" / "state"
-    return root / "ferry" / _SNAPSHOT_FILENAME
+class DriftKind(Enum):
+    """Distinct dispositions of a `HookStatus` (or its absence).
+
+    The two callers (status output and install dry-run preview) write
+    different messages for each kind — so the wording stays in the
+    caller — but the state-machine over `HookStatus` lives here, in
+    one place. Adding a new state means one new enum value and one
+    new branch per renderer rather than two parallel switch ladders.
+
+    Values cover both `HookStatus`-derived states AND the two
+    snapshot-absent states the status command surfaces (managed block
+    present without a snapshot; no managed block at all).
+    """
+
+    CLEAN = "clean"
+    NO_SNAPSHOT = "no_snapshot"
+    BLOCK_PRESENT_NO_SNAPSHOT = "block_present_no_snapshot"
+    SNAPSHOT_FOR_OTHER_INSTALL = "snapshot_for_other_install"
+    UPSTREAM_AND_LOCAL_DRIFT = "upstream_and_local_drift"
+    UPSTREAM_DRIFT = "upstream_drift"
+    LOCAL_DRIFT = "local_drift"
+    BUNDLED_MISSING = "bundled_missing"
+    BLOCK_REMOVED = "block_removed"
+
+
+def classify_drift(
+    drift: HookStatus | None,
+    *,
+    custom_systems_path: Path | None = None,
+    block_present: bool | None = None,
+) -> DriftKind:
+    """Classify the drift state for one ES-DE install.
+
+    `custom_systems_path` and `block_present` are only consulted when
+    `drift is None` — they let the status command distinguish "managed
+    block exists but no snapshot" (older install, drift detection not
+    enabled) from "fully uninstalled." Callers that don't care about
+    that split (the install dry-run preview) pass neither.
+
+    `drift.snapshot.custom_systems_path` is matched against the
+    install's `custom_systems_path` to detect the
+    SNAPSHOT_FOR_OTHER_INSTALL state — same drift snapshot, different
+    install on disk.
+    """
+    if drift is None:
+        if block_present:
+            return DriftKind.BLOCK_PRESENT_NO_SNAPSHOT
+        return DriftKind.NO_SNAPSHOT
+
+    if (
+        custom_systems_path is not None
+        and drift.snapshot.custom_systems_path != custom_systems_path
+    ):
+        return DriftKind.SNAPSHOT_FOR_OTHER_INSTALL
+
+    if drift.is_clean:
+        return DriftKind.CLEAN
+    if drift.upstream_drift and drift.local_drift:
+        return DriftKind.UPSTREAM_AND_LOCAL_DRIFT
+    if drift.upstream_drift:
+        return DriftKind.UPSTREAM_DRIFT
+    if drift.local_drift:
+        return DriftKind.LOCAL_DRIFT
+    if not drift.bundled_present:
+        return DriftKind.BUNDLED_MISSING
+    if not drift.block_present:
+        return DriftKind.BLOCK_REMOVED
+    return DriftKind.CLEAN  # defensive — every case above covers actual states
+
+
+def default_snapshot_path(env: Mapping[str, str] | None = None) -> Path:
+    """Resolve the launch-hooks snapshot path under the user's state dir."""
+    return state_dir(env) / "ferry" / _SNAPSHOT_FILENAME
 
 
 def compute_file_sha256(path: Path) -> str:
-    """SHA-256 of a file's bytes. Streams in 64KB chunks."""
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(64 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    """SHA-256 of a file's bytes — thin wrapper for back-compat."""
+    return sha256_file(path)
 
 
 def extract_managed_block(custom_path: Path) -> str | None:
@@ -477,7 +533,7 @@ def make_snapshot(*, bundled_path: Path, custom_systems_path: Path) -> Snapshot:
         bundled_sha256=compute_file_sha256(bundled_path),
         custom_systems_path=custom_systems_path,
         managed_block_sha256=block_sha,
-        installed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        installed_at=now_iso(),
     )
 
 

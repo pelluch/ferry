@@ -31,13 +31,12 @@ import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ferry.adapters.romm import RommApi, RommApiError, RommConflictError
-from ferry.domain.iso_time import parse_iso_to_epoch
+from ferry.domain.iso_time import now_iso, parse_iso_to_epoch
 from ferry.domain.save_conflicts import Classification, classify
 from ferry.domain.save_local import LocalSave
 from ferry.domain.save_plan import PlannedSaveAction, SavePlan
@@ -120,11 +119,6 @@ def strip_datetime_tag(filename: str) -> str:
     """`Mario [2026-04-24_15-51-34].srm` → `Mario.srm`."""
     name, ext = os.path.splitext(filename)
     return _DATETIME_TAG_PATTERN.sub("", name) + ext
-
-
-def now_iso() -> str:
-    """UTC timestamp, second precision, `Z` suffix."""
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -314,24 +308,6 @@ def merge_save_records(
     return tuple(sorted(by_key.values(), key=lambda s: (s.emulator, s.slot)))
 
 
-def rom_as_kwargs(rom: RomState) -> dict[str, Any]:
-    """Field-by-field kwargs for re-constructing a RomState (avoiding asdict's recursion)."""
-    return {
-        "rom_id": rom.rom_id,
-        "platform_slug": rom.platform_slug,
-        "name": rom.name,
-        "source_filename": rom.source_filename,
-        "source_md5": rom.source_md5,
-        "source_size": rom.source_size,
-        "source_updated_at": rom.source_updated_at,
-        "transforms": rom.transforms,
-        "outputs": rom.outputs,
-        "primary_output_index": rom.primary_output_index,
-        "synced_at": rom.synced_at,
-        "saves": rom.saves,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Abstract base — shared sync/plan/delete machinery
 # ---------------------------------------------------------------------------
@@ -495,7 +471,7 @@ class SaveBackendBase(ABC):
         for rom_id, updates in rom_save_updates.items():
             rom = state.roms[rom_id]
             new_saves = merge_save_records(rom.saves, updates)
-            result.updated_roms[rom_id] = RomState(**{**rom_as_kwargs(rom), "saves": new_saves})
+            result.updated_roms[rom_id] = replace(rom, saves=new_saves)
 
         return result
 
@@ -571,7 +547,7 @@ class SaveBackendBase(ABC):
 
         if rom_save_updates:
             new_saves = merge_save_records(rom.saves, rom_save_updates)
-            result.updated_roms[rom.rom_id] = RomState(**{**rom_as_kwargs(rom), "saves": new_saves})
+            result.updated_roms[rom.rom_id] = replace(rom, saves=new_saves)
 
         return result
 

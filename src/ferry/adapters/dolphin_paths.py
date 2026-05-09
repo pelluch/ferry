@@ -44,6 +44,7 @@ from ferry.adapters.dolphin_config import (
     MemcardMode,
     parse_dolphin_ini,
 )
+from ferry.domain.install_selection import select_active
 
 logger = logging.getLogger(__name__)
 
@@ -158,24 +159,11 @@ def discover_dolphin_installs(home: Path | None = None) -> list[DolphinInstall]:
 def select_active_install(installs: list[DolphinInstall]) -> DolphinInstall | None:
     """Pick the Dolphin install ferry should sync, or None if ambiguous.
 
-    Decision table (mirrors `retroarch_paths.select_active_install`):
-      - 0 installs → None.
-      - 1 install → that one.
-      - 2+ installs:
-        - Exactly one has `has_saves=True` → that one (active-use signal).
-        - 0 have saves → first by priority order (nothing at risk).
-        - 2+ have saves → None (caller asks the user via config override).
+    Active-use signal: any `.gci` file under `saves_root`. See
+    `domain.install_selection.select_active` for the full decision
+    table.
     """
-    if not installs:
-        return None
-    if len(installs) == 1:
-        return installs[0]
-    with_saves = [i for i in installs if i.has_saves]
-    if len(with_saves) == 1:
-        return with_saves[0]
-    if not with_saves:
-        return installs[0]
-    return None
+    return select_active(installs, has_active=lambda i: i.has_saves)
 
 
 def _has_gci_files(saves_root: Path) -> bool:

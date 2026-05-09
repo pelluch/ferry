@@ -44,11 +44,10 @@ import logging
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import IO
+
+from ferry.domain.hashing import CHUNK_SIZE, md5_file, md5_stream
 
 logger = logging.getLogger(__name__)
-
-_HASH_CHUNK_SIZE = 64 * 1024
 
 
 def hash_file_bytes(path: Path) -> str:
@@ -61,7 +60,7 @@ def hash_file_bytes(path: Path) -> str:
     the stored output hash (zip-bytes md5) are different — adoption
     needs both.
     """
-    return _hash_basic_file(path)
+    return md5_file(path)
 
 
 def hash_orphan_file(path: Path) -> str | None:
@@ -90,7 +89,7 @@ def hash_orphan_file(path: Path) -> str | None:
             return _hash_gz_or_largest_tar(path)
         if suffix == ".bz2":
             return _hash_bz2(path)
-        return _hash_basic_file(path)
+        return md5_file(path)
     except OSError as e:
         logger.warning("could not hash orphan %s: %s", path, e)
         return None
@@ -108,12 +107,12 @@ def _hash_largest_zip_member(path: Path) -> str:
         with zipfile.ZipFile(path, "r") as z:
             members = z.infolist()
             if not members:
-                return _hash_basic_file(path)
+                return md5_file(path)
             largest = max(members, key=lambda m: m.file_size)
             with z.open(largest, "r") as f:
-                return _stream_md5(f)
+                return md5_stream(f)
     except zipfile.BadZipFile:
-        return _hash_basic_file(path)
+        return md5_file(path)
 
 
 def _hash_largest_tar_member(path: Path, *, mode: str) -> str:
@@ -122,15 +121,15 @@ def _hash_largest_tar_member(path: Path, *, mode: str) -> str:
         with tarfile.open(path, mode) as f:  # type: ignore[arg-type]
             regular = [m for m in f.getmembers() if m.isfile()]
             if not regular:
-                return _hash_basic_file(path)
+                return md5_file(path)
             largest = max(regular, key=lambda m: m.size)
             extracted = f.extractfile(largest)
             if extracted is None:
-                return _hash_basic_file(path)
+                return md5_file(path)
             with extracted as fp:
-                return _stream_md5(fp)
+                return md5_stream(fp)
     except tarfile.ReadError:
-        return _hash_basic_file(path)
+        return md5_file(path)
 
 
 def _hash_gz_or_largest_tar(path: Path) -> str:
@@ -150,7 +149,7 @@ def _hash_gz_or_largest_tar(path: Path) -> str:
             if extracted is None:
                 return _hash_gz_stream(path)
             with extracted as fp:
-                return _stream_md5(fp)
+                return md5_stream(fp)
     except tarfile.ReadError:
         return _hash_gz_stream(path)
 
@@ -160,10 +159,10 @@ def _hash_gz_stream(path: Path) -> str:
     h = hashlib.md5(usedforsecurity=False)
     try:
         with gzip.open(path, "rb") as f:
-            while chunk := f.read(_HASH_CHUNK_SIZE):
+            while chunk := f.read(CHUNK_SIZE):
                 h.update(chunk)
     except (OSError, EOFError):
-        return _hash_basic_file(path)
+        return md5_file(path)
     return h.hexdigest()
 
 
@@ -172,24 +171,8 @@ def _hash_bz2(path: Path) -> str:
     h = hashlib.md5(usedforsecurity=False)
     try:
         with bz2.open(path, "rb") as f:
-            while chunk := f.read(_HASH_CHUNK_SIZE):
+            while chunk := f.read(CHUNK_SIZE):
                 h.update(chunk)
     except (OSError, EOFError):
-        return _hash_basic_file(path)
-    return h.hexdigest()
-
-
-def _hash_basic_file(path: Path) -> str:
-    """Streaming md5 of the file bytes. The "non-archive" path."""
-    h = hashlib.md5(usedforsecurity=False)
-    with path.open("rb") as f:
-        while chunk := f.read(_HASH_CHUNK_SIZE):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _stream_md5(stream: IO[bytes]) -> str:
-    h = hashlib.md5(usedforsecurity=False)
-    while chunk := stream.read(_HASH_CHUNK_SIZE):
-        h.update(chunk)
+        return md5_file(path)
     return h.hexdigest()

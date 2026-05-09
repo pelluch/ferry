@@ -15,6 +15,7 @@ from ferry.config.schema import (
     TransformsConfig,
 )
 from ferry.domain.destination import PRESETS, Destination, resolve_preset
+from ferry.domain.user_dirs import config_dir
 from ferry.transforms import known_transforms
 
 ENV_API_KEY = "FERRY_ROMM_API_KEY"
@@ -56,7 +57,7 @@ class ConfigInvalidError(ConfigError):
     """The configuration file is malformed or missing required values."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LoadedConfig:
     config: Config
     config_path: Path
@@ -64,10 +65,7 @@ class LoadedConfig:
 
 
 def default_config_path(env: Mapping[str, str] | None = None) -> Path:
-    env = env if env is not None else os.environ
-    base = env.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / "ferry" / "config.toml"
+    return config_dir(env) / "ferry" / "config.toml"
 
 
 def load_config(
@@ -102,10 +100,7 @@ def load_config(
     romm_raw = raw.get("romm")
     if not isinstance(romm_raw, dict):
         raise ConfigInvalidError(f"[romm] section is required in {path}")
-
-    unknown_romm = set(romm_raw.keys()) - _ROMM_KEYS
-    if unknown_romm:
-        raise ConfigInvalidError(f"unknown keys under [romm] in {path}: {sorted(unknown_romm)}")
+    _check_unknown_keys(romm_raw, allowed=_ROMM_KEYS, label="romm", path=path)
 
     url = _require_str(romm_raw, "url", path)
     url = _validate_url(url, path)
@@ -148,6 +143,31 @@ def load_config(
     return LoadedConfig(config=config, config_path=path, api_key_source=api_key_source)
 
 
+def _extract_section(
+    raw: dict, name: str, *, allowed_keys: frozenset[str], path: Path
+) -> dict | None:
+    """Pull a top-level config section out, validate shape + unknown keys.
+
+    Returns the section dict, or None if the section isn't present in the
+    config. The "must be a table" / "unknown keys under X" boilerplate
+    every section parser used to repeat lives here.
+    """
+    if name not in raw:
+        return None
+    section = raw[name]
+    if not isinstance(section, dict):
+        raise ConfigInvalidError(f"[{name}] must be a table in {path}")
+    _check_unknown_keys(section, allowed=allowed_keys, label=name, path=path)
+    return section
+
+
+def _check_unknown_keys(section: dict, *, allowed: frozenset[str], label: str, path: Path) -> None:
+    """Raise if *section* has keys outside *allowed*. Pure validation."""
+    unknown = set(section.keys()) - allowed
+    if unknown:
+        raise ConfigInvalidError(f"unknown keys under [{label}] in {path}: {sorted(unknown)}")
+
+
 def _parse_launch_hooks(raw: dict, path: Path) -> LaunchHooksConfig:
     """Parse the optional `[launch_hooks]` section.
 
@@ -155,14 +175,9 @@ def _parse_launch_hooks(raw: dict, path: Path) -> LaunchHooksConfig:
     (logging on, default log path). Section presence with empty body
     behaves the same as the section being absent.
     """
-    if "launch_hooks" not in raw:
+    section = _extract_section(raw, "launch_hooks", allowed_keys=_LAUNCH_HOOKS_KEYS, path=path)
+    if section is None:
         return LaunchHooksConfig()
-    section = raw["launch_hooks"]
-    if not isinstance(section, dict):
-        raise ConfigInvalidError(f"[launch_hooks] must be a table in {path}")
-    unknown = set(section.keys()) - _LAUNCH_HOOKS_KEYS
-    if unknown:
-        raise ConfigInvalidError(f"unknown keys under [launch_hooks] in {path}: {sorted(unknown)}")
     log_enabled = section.get("log_enabled", True)
     if not isinstance(log_enabled, bool):
         raise ConfigInvalidError(f"[launch_hooks].log_enabled must be a boolean in {path}")
@@ -178,16 +193,9 @@ def _parse_launch_hooks(raw: dict, path: Path) -> LaunchHooksConfig:
 
 
 def _parse_saves(raw: dict, path: Path) -> SavesConfig | None:
-    if "saves" not in raw:
+    section = _extract_section(raw, "saves", allowed_keys=_SAVES_KEYS, path=path)
+    if section is None:
         return None
-    section = raw["saves"]
-    if not isinstance(section, dict):
-        raise ConfigInvalidError(f"[saves] must be a table in {path}")
-
-    unknown = set(section.keys()) - _SAVES_KEYS
-    if unknown:
-        raise ConfigInvalidError(f"unknown keys under [saves] in {path}: {sorted(unknown)}")
-
     enabled = section.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigInvalidError(f"[saves].enabled must be a boolean in {path}")
@@ -218,16 +226,9 @@ def _parse_saves(raw: dict, path: Path) -> SavesConfig | None:
 
 
 def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:
-    if "sync" not in raw:
+    sync = _extract_section(raw, "sync", allowed_keys=_SYNC_KEYS, path=path)
+    if sync is None:
         return None
-    sync = raw["sync"]
-    if not isinstance(sync, dict):
-        raise ConfigInvalidError(f"[sync] must be a table in {path}")
-
-    unknown = set(sync.keys()) - _SYNC_KEYS
-    if unknown:
-        raise ConfigInvalidError(f"unknown keys under [sync] in {path}: {sorted(unknown)}")
-
     collections = _parse_string_list(sync, "collections", path)
     platforms = _parse_string_list(sync, "platforms", path)
     if not collections and not platforms:
@@ -274,9 +275,11 @@ def _parse_string_list(table: dict, key: str, path: Path) -> tuple[str, ...]:
 
 
 def _parse_transforms(raw: dict, path: Path) -> TransformsConfig:
+    # `[transforms]` is special — its keys are arbitrary platform slugs,
+    # so we don't pass `allowed_keys` here. Each per-slug sub-table IS
+    # validated against `_TRANSFORMS_PLATFORM_KEYS`.
     if "transforms" not in raw:
         return TransformsConfig(pipelines={})
-
     section = raw["transforms"]
     if not isinstance(section, dict):
         raise ConfigInvalidError(f"[transforms] must be a table in {path}")
@@ -286,11 +289,12 @@ def _parse_transforms(raw: dict, path: Path) -> TransformsConfig:
     for platform_slug, sub in section.items():
         if not isinstance(sub, dict):
             raise ConfigInvalidError(f"[transforms.{platform_slug}] must be a table in {path}")
-        unknown = set(sub.keys()) - _TRANSFORMS_PLATFORM_KEYS
-        if unknown:
-            raise ConfigInvalidError(
-                f"unknown keys under [transforms.{platform_slug}] in {path}: {sorted(unknown)}"
-            )
+        _check_unknown_keys(
+            sub,
+            allowed=_TRANSFORMS_PLATFORM_KEYS,
+            label=f"transforms.{platform_slug}",
+            path=path,
+        )
         pipeline = sub.get("pipeline", [])
         if not isinstance(pipeline, list) or not all(isinstance(t, str) for t in pipeline):
             raise ConfigInvalidError(
@@ -309,17 +313,9 @@ def _parse_transforms(raw: dict, path: Path) -> TransformsConfig:
 
 
 def _parse_destination(raw: dict, path: Path) -> Destination | None:
-    if "destination" not in raw:
+    dest = _extract_section(raw, "destination", allowed_keys=_DESTINATION_KEYS, path=path)
+    if dest is None:
         return None
-
-    dest = raw["destination"]
-    if not isinstance(dest, dict):
-        raise ConfigInvalidError(f"[destination] must be a table in {path}")
-
-    unknown = set(dest.keys()) - _DESTINATION_KEYS
-    if unknown:
-        raise ConfigInvalidError(f"unknown keys under [destination] in {path}: {sorted(unknown)}")
-
     preset_name = dest.get("preset")
     roms_raw = dest.get("roms_base")
     bios_raw = dest.get("bios_base")
