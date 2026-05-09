@@ -37,12 +37,12 @@ def unzip(inputs: list[Path], output_dir: Path) -> list[Path]:
             for info in zf.infolist():
                 if info.is_dir():
                     continue
-                if _is_unsafe_member(info.filename):
+                if is_unsafe_zip_member(info.filename):
                     raise TransformError(
                         f"refusing to extract unsafe path from {src.name}: {info.filename!r}"
                     )
                 target = (output_dir / info.filename).resolve()
-                if not _is_within(target, output_root):
+                if not is_within_dir(target, output_root):
                     raise TransformError(
                         f"refusing to extract {info.filename!r} from {src.name}: "
                         f"escapes output directory"
@@ -60,7 +60,7 @@ def unzip(inputs: list[Path], output_dir: Path) -> list[Path]:
     return sorted(extracted)
 
 
-def _is_unsafe_member(filename: str) -> bool:
+def is_unsafe_zip_member(filename: str) -> bool:
     """Reject obviously-malicious entries before we resolve the path."""
     if not filename:
         return True
@@ -72,7 +72,7 @@ def _is_unsafe_member(filename: str) -> bool:
     return ".." in p.parts
 
 
-def _is_within(target: Path, root: Path) -> bool:
+def is_within_dir(target: Path, root: Path) -> bool:
     try:
         return target.is_relative_to(root)
     except ValueError:
