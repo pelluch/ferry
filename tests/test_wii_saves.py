@@ -93,13 +93,20 @@ def _plant_save_folder(
     title_id_low: str,
     files: dict[str, bytes],
 ) -> Path:
-    folder = wii_saves_root / title_id_high / title_id_low / "data"
-    folder.mkdir(parents=True, exist_ok=True)
+    """Plant *files* under the title parent `<HIGH>/<LOW>/`.
+
+    Relpaths in *files* should typically be under `data/` (real Wii
+    saves) but `content/` and other subdirs are valid too — the v3.7
+    walker zips the whole title parent recursively. Returns the title
+    parent (matches what the walker will set as `LocalSave.local_path`).
+    """
+    title_parent = wii_saves_root / title_id_high / title_id_low
+    title_parent.mkdir(parents=True, exist_ok=True)
     for relpath, content in files.items():
-        target = folder / relpath
+        target = title_parent / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-    return folder
+    return title_parent
 
 
 def _wii_header(title_id: int = _METROID_PRIME_3_TITLE_ID) -> DiscHeader:
@@ -114,7 +121,9 @@ def _wii_header(title_id: int = _METROID_PRIME_3_TITLE_ID) -> DiscHeader:
 def test_wii_save_folder_resolves_to_expected_path(tmp_path: Path) -> None:
     install = _make_install(tmp_path / "gc", wii_saves_root=tmp_path / "wii" / "title")
     folder = wii_save_folder(install, _wii_header())
-    assert folder == tmp_path / "wii" / "title" / "00010000" / "524d3345" / "data"
+    # v3.7: title parent (parent of data/), recursive — includes
+    # data/, content/, and any other subdirs Dolphin populates.
+    assert folder == tmp_path / "wii" / "title" / "00010000" / "524d3345"
 
 
 def test_wii_save_folder_returns_none_without_wii_saves_root(tmp_path: Path) -> None:
@@ -167,8 +176,10 @@ def test_walker_skips_non_wii_roms(tmp_path: Path) -> None:
     tool.read_header.assert_not_called()
 
 
-def test_walker_skips_titles_without_data_folder(tmp_path: Path) -> None:
-    """A Wii title with no NAND save yet → no LocalSave, no warning."""
+def test_walker_skips_titles_without_save_state(tmp_path: Path) -> None:
+    """A Wii title with no NAND save yet → no LocalSave, no warning.
+    Triggered when the title parent doesn't exist OR exists but has no
+    non-ignored files anywhere underneath."""
     wii_root = tmp_path / "wii" / "title"
     wii_root.mkdir(parents=True)
     install = _make_install(tmp_path / "gc", wii_saves_root=wii_root)
@@ -182,21 +193,42 @@ def test_walker_skips_titles_without_data_folder(tmp_path: Path) -> None:
     assert warnings == []
 
 
+def test_walker_skips_title_parent_with_only_ignored_files(tmp_path: Path) -> None:
+    """Title parent exists but contains only OS cruft → treat as
+    `no save yet` (no warning, no emission)."""
+    wii_root = tmp_path / "wii" / "title"
+    install = _make_install(tmp_path / "gc", wii_saves_root=wii_root)
+    rom = _make_rom(1)
+    rom_path = _plant_rom(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
+    _plant_save_folder(
+        wii_root,
+        _METROID_PRIME_3_HIGH,
+        _METROID_PRIME_3_LOW,
+        {".DS_Store": b"cruft", "__MACOSX/x": b"shadow"},
+    )
+    tool = _make_tool({str(rom_path): _wii_header()})
+
+    saves, warnings = list_local_saves(install, [rom], roms_base=tmp_path, tool=tool)
+
+    assert saves == []
+    assert warnings == []
+
+
 # ---------------------------------------------------------------------------
 # list_local_saves — happy paths
 # ---------------------------------------------------------------------------
 
 
-def test_walker_emits_local_save_for_wii_title_with_data_folder(tmp_path: Path) -> None:
+def test_walker_emits_local_save_for_wii_title_with_save_state(tmp_path: Path) -> None:
     wii_root = tmp_path / "wii" / "title"
     install = _make_install(tmp_path / "gc", wii_saves_root=wii_root)
     rom = _make_rom(1)
     rom_path = _plant_rom(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
-    save_folder = _plant_save_folder(
+    title_parent = _plant_save_folder(
         wii_root,
         _METROID_PRIME_3_HIGH,
         _METROID_PRIME_3_LOW,
-        {"save.bin": b"main save", "banner.bin": b"banner"},
+        {"data/save.bin": b"main save", "data/banner.bin": b"banner"},
     )
     tool = _make_tool({str(rom_path): _wii_header()})
 
@@ -206,27 +238,58 @@ def test_walker_emits_local_save_for_wii_title_with_data_folder(tmp_path: Path) 
     assert len(saves) == 1
     ls = saves[0]
     assert ls.rom_id == 1
-    assert ls.emulator == "dolphin"
-    assert ls.slot == "default"
-    assert ls.save_filename == f"{_METROID_PRIME_3_HIGH}-{_METROID_PRIME_3_LOW}.zip"
-    assert ls.local_path == save_folder
+    # v3.7 Argosy compat: distinct emulator tag, slot == filename base
+    # == rom base name (= primary_output stem).
+    assert ls.emulator == "dolphin_wii"
+    assert ls.slot == "Metroid Prime 3 (USA)"
+    assert ls.save_filename == "Metroid Prime 3 (USA).zip"
+    # local_path is the title parent (not the data subfolder) so the
+    # archiver picks up data/, content/, and any other subdirs.
+    assert ls.local_path == title_parent
     assert ls.local_size == len(b"main save") + len(b"banner")
+
+
+def test_walker_includes_content_subfolder_in_archive_scope(tmp_path: Path) -> None:
+    """v3.7 widens the archive scope from data/ to the title parent.
+    Files under content/ (VC titles, system-update content) should now
+    contribute to the archive's hash and size."""
+    wii_root = tmp_path / "wii" / "title"
+    install = _make_install(tmp_path / "gc", wii_saves_root=wii_root)
+    rom = _make_rom(1)
+    rom_path = _plant_rom(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
+    _plant_save_folder(
+        wii_root,
+        _METROID_PRIME_3_HIGH,
+        _METROID_PRIME_3_LOW,
+        {
+            "data/save.bin": b"actual state",
+            "content/title.tmd": b"vc content",
+            "content/sub/extra.bin": b"deep content",
+        },
+    )
+    tool = _make_tool({str(rom_path): _wii_header()})
+
+    saves, _warnings = list_local_saves(install, [rom], roms_base=tmp_path, tool=tool)
+    assert len(saves) == 1
+    expected_size = len(b"actual state") + len(b"vc content") + len(b"deep content")
+    assert saves[0].local_size == expected_size
 
 
 def test_walker_local_md5_matches_zip_content_hash(tmp_path: Path) -> None:
     """The load-bearing property: walker's `local_md5` equals what RomM
-    would compute on the zip we'd build from the same folder. Without
+    would compute on the zip we'd build from the same folder — and
+    what Argosy would compute on its end (three-way invariant). Without
     this, classify-time hash equality wouldn't succeed on byte-stable
     content."""
     wii_root = tmp_path / "wii" / "title"
     install = _make_install(tmp_path / "gc", wii_saves_root=wii_root)
     rom = _make_rom(1)
     rom_path = _plant_rom(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
-    save_folder = _plant_save_folder(
+    title_parent = _plant_save_folder(
         wii_root,
         _METROID_PRIME_3_HIGH,
         _METROID_PRIME_3_LOW,
-        {"save.bin": b"main save", "nested/extra.dat": b"deep state"},
+        {"data/save.bin": b"main save", "data/nested/extra.dat": b"deep state"},
     )
     tool = _make_tool({str(rom_path): _wii_header()})
 
@@ -234,7 +297,7 @@ def test_walker_local_md5_matches_zip_content_hash(tmp_path: Path) -> None:
     assert len(saves) == 1
 
     archive = tmp_path / "out.zip"
-    archive_save_folder(save_folder, archive)
+    archive_save_folder(title_parent, archive)
     assert saves[0].local_md5 == compute_content_hash(archive)
 
 
@@ -250,9 +313,10 @@ def test_walker_skips_dotfiles_in_size_and_mtime(tmp_path: Path) -> None:
         _METROID_PRIME_3_HIGH,
         _METROID_PRIME_3_LOW,
         {
-            "save.bin": b"real",
-            ".DS_Store": b"cruft",
-            "__MACOSX/save.bin": b"shadow",
+            "data/save.bin": b"real",
+            "data/.DS_Store": b"cruft",
+            "data/__MACOSX/save.bin": b"shadow",
+            ".DS_Store": b"top-level cruft",
         },
     )
     tool = _make_tool({str(rom_path): _wii_header()})
@@ -324,7 +388,9 @@ def test_walker_uses_cache_when_provided(tmp_path: Path) -> None:
     install = _make_install(tmp_path / "gc", wii_saves_root=wii_root)
     rom = _make_rom(1)
     rom_path = _plant_rom(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
-    _plant_save_folder(wii_root, _METROID_PRIME_3_HIGH, _METROID_PRIME_3_LOW, {"save.bin": b"x"})
+    _plant_save_folder(
+        wii_root, _METROID_PRIME_3_HIGH, _METROID_PRIME_3_LOW, {"data/save.bin": b"x"}
+    )
 
     cache = DiscHeaderCache(tmp_path / "cache.json")
     cache.put(rom_path, _wii_header())

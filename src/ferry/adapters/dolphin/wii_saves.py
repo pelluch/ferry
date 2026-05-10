@@ -1,24 +1,40 @@
 """Walk standalone-Dolphin's Wii NAND save tree, matching titles to known ROMs.
 
 Wii saves live as folders, not files: each title's state is the
-contents of `<wii_saves_root>/<TID_HIGH>/<TID_LOW>/data/`. ferry treats
-each folder as one `LocalSave` per Wii ROM; archive-on-upload and
-extract-on-download are wired by the Wii save backend (ck4) via the
-generic transform hooks on `SaveBackendBase` (ck3).
+contents of `<wii_saves_root>/<TID_HIGH>/<TID_LOW>/` — a recursive
+parent containing `data/` (the actual save state — `banner.bin`,
+`save.bin`, etc.), `content/` (usually empty for vanilla discs;
+populated for VC titles + games with system-update content), and any
+other subdirs Dolphin populates per title. ferry treats each title
+parent as one `LocalSave` per Wii ROM; archive-on-upload and
+extract-on-download are wired by the Wii save backend via the generic
+transform hooks on `SaveBackendBase`.
 
 For each Wii ROM in the library, ferry:
 
 1. Reads the disc header (via cached `dolphin-tool` invocation) to get
    the 64-bit `title_id`.
 2. Splits the title id into 8-hex `TID_HIGH` + `TID_LOW` and probes
-   `<wii_saves_root>/<TID_HIGH>/<TID_LOW>/data/`. Missing → no save
-   yet for this title; skip silently.
+   `<wii_saves_root>/<TID_HIGH>/<TID_LOW>/`. Missing or empty (no
+   non-ignored files anywhere underneath) → no save yet for this
+   title; skip silently.
 3. Computes `LocalSave.local_md5` via `folder_content_hash`, which
    matches RomM's server-side `content_hash` for the corresponding
-   zip without ever materializing one.
+   zip without ever materializing one. The wrapper prefix passed to
+   `folder_content_hash` matches what `archive_save_folder` will
+   produce on upload (`<TID_LOW>/...`), keeping the three-way invariant
+   with RomM and Argosy.
 
-`LocalSave.local_path` points at the folder itself. The base class's
-upload path will route through `_pre_upload_archive` (ck3) to
+**v3.7 schema (Argosy compat):** save_filename = `<rom_base_name>.zip`,
+slot = `<rom_base_name>`, emulator = `dolphin_wii`. `<rom_base_name>` is
+`Path(rom.primary_output.path).stem` — matches what Argosy on the same
+on-disk file would compute. Slot equals filename base because Argosy
+expects symmetry AND because RomM's slot-based 409 conflict detection
+only fires on truthy slots (preserving v3.5's server-as-arbiter
+contract for Wii too).
+
+`LocalSave.local_path` points at the title parent folder. The base
+class's upload path will route through `_pre_upload_archive` to
 materialize the zip on demand.
 """
 
@@ -48,17 +64,18 @@ __all__ = ("list_local_saves", "wii_save_folder")
 logger = logging.getLogger(__name__)
 
 _WII_PLATFORM_DIR = "wii"
-_DOLPHIN_EMULATOR_LABEL = "dolphin"
-_WII_SLOT = "default"
+_DOLPHIN_WII_EMULATOR_LABEL = "dolphin_wii"
 
 
 def wii_save_folder(install: DolphinInstall, header: DiscHeader) -> Path | None:
     """Resolve the on-disk save folder for a Wii title.
 
-    Returns `<wii_saves_root>/<TID_HIGH>/<TID_LOW>/data`, or None when
+    Returns `<wii_saves_root>/<TID_HIGH>/<TID_LOW>/` (the title parent,
+    recursive — includes `data/`, `content/`, etc.), or None when
     either `install.wii_saves_root` or `header.title_id` is unavailable.
-    Path may not exist on disk — callers probe separately to decide
-    "no save yet" vs. "supported but empty."
+    Path may not exist on disk, or may exist but contain no save state
+    yet — callers probe separately to decide "no save yet" vs.
+    "supported but empty."
     """
     if install.wii_saves_root is None:
         return None
@@ -66,7 +83,7 @@ def wii_save_folder(install: DolphinInstall, header: DiscHeader) -> Path | None:
     tid_low = header.title_id_low
     if tid_high is None or tid_low is None:
         return None
-    return install.wii_saves_root / tid_high / tid_low / "data"
+    return install.wii_saves_root / tid_high / tid_low
 
 
 def list_local_saves(
@@ -130,13 +147,13 @@ def list_local_saves(
             warnings.append(f"rom_id={rom.rom_id}: could not hash {save_folder}: {exc}")
             continue
 
-        save_filename = f"{header.title_id_high}-{header.title_id_low}.zip"
+        rom_base_name = Path(rom.primary_output.path).stem
         matched.append(
             LocalSave(
                 rom_id=rom.rom_id,
-                emulator=_DOLPHIN_EMULATOR_LABEL,
-                slot=_WII_SLOT,
-                save_filename=save_filename,
+                emulator=_DOLPHIN_WII_EMULATOR_LABEL,
+                slot=rom_base_name,
+                save_filename=f"{rom_base_name}.zip",
                 local_path=save_folder,
                 local_mtime=mtime,
                 local_md5=content_hash,

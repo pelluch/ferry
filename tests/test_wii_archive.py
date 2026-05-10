@@ -88,7 +88,37 @@ def test_archive_skips_dotfiles(tmp_path: Path) -> None:
 
     with zipfile.ZipFile(archive) as zf:
         names = set(zf.namelist())
-    assert names == {"save.bin"}
+    # Every entry is prefixed with the source folder name (wrapper dir
+    # required for Argosy compat).
+    assert names == {"src/save.bin"}
+
+
+def test_archive_wraps_every_entry_with_source_folder_name(tmp_path: Path) -> None:
+    """Argosy's `unzipDirect` strips the first-level dir unconditionally;
+    a flat zip would have its first sub-dir mistakenly stripped on the
+    Argosy side. Wrapper presence is what matters."""
+    src = tmp_path / "RSPE"  # mimics a Wii TID_LOW folder
+    _populate(
+        src,
+        {
+            "data/save.bin": b"actual state",
+            "data/banner.bin": b"banner",
+            "content/title.tmd": b"vc title content",
+            "top.txt": b"depth-0 file",
+        },
+    )
+
+    archive = tmp_path / "out.zip"
+    archive_save_folder(src, archive)
+
+    with zipfile.ZipFile(archive) as zf:
+        names = sorted(zf.namelist())
+    assert names == [
+        "RSPE/content/title.tmd",
+        "RSPE/data/banner.bin",
+        "RSPE/data/save.bin",
+        "RSPE/top.txt",
+    ]
 
 
 def test_extract_skips_dotfiles_in_received_archive(tmp_path: Path) -> None:
@@ -145,6 +175,60 @@ def test_extract_refuses_path_traversal(tmp_path: Path) -> None:
         extract_save_zip(archive, dest)
 
 
+def test_extract_refuses_post_strip_traversal(tmp_path: Path) -> None:
+    """Wrapper-strip happens after the unsafe-member check, but a
+    malicious zip could still try `wrapper/../../escape` — the leading
+    `..` lives in the entry's path parts, so `is_unsafe_zip_member`
+    catches it before the wrapper is even captured."""
+    archive = tmp_path / "bad.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("wrapper/../../escape.bin", b"oops")
+
+    dest = tmp_path / "out"
+    with pytest.raises(ValueError, match="unsafe path"):
+        extract_save_zip(archive, dest)
+
+
+def test_extract_strips_arbitrary_wrapper_name(tmp_path: Path) -> None:
+    """Argosy's `unzipDirect` strips whatever the first entry's
+    top-level dir is — wrapper name is irrelevant. Mirror that: a zip
+    produced by some other tool with a different wrapper name should
+    still extract cleanly, with the wrapper stripped."""
+    archive = tmp_path / "argosy-style.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        # Wrapper name doesn't match any Wii TID — could be anything.
+        zf.writestr("Wii Sports/data/save.bin", b"actual save")
+        zf.writestr("Wii Sports/data/banner.bin", b"banner")
+        zf.writestr("Wii Sports/content/empty.placeholder", b"")
+
+    dest = tmp_path / "out"
+    extract_save_zip(archive, dest)
+
+    assert _read_tree(dest) == {
+        "data/save.bin": b"actual save",
+        "data/banner.bin": b"banner",
+        "content/empty.placeholder": b"",
+    }
+
+
+def test_extract_handles_flat_zip_without_wrapper(tmp_path: Path) -> None:
+    """Defensive: a zip with no top-level dir (flat entries) gets no
+    prefix stripped. Argosy's `unzipDirect` does the same — wrapper is
+    only captured when the first entry contains '/'."""
+    archive = tmp_path / "flat.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("save.bin", b"flat save")
+        zf.writestr("banner.bin", b"flat banner")
+
+    dest = tmp_path / "out"
+    extract_save_zip(archive, dest)
+
+    assert _read_tree(dest) == {
+        "save.bin": b"flat save",
+        "banner.bin": b"flat banner",
+    }
+
+
 # ---------------------------------------------------------------------------
 # compute_content_hash
 # ---------------------------------------------------------------------------
@@ -195,11 +279,13 @@ def test_compute_content_hash_invariant_to_archive_bytes(tmp_path: Path) -> None
     # Force a different mtime on the source so a re-archive picks up
     # a different DOS time field. Then archive B with explicit mtimes
     # set to a fixed point in the past, simulating a different machine.
+    # Use the same wrapping prefix as archive_save_folder so the hash
+    # input is the same regardless of zip-byte differences.
     time.sleep(0.01)  # avoid stat-mtime equality
     archive_b = tmp_path / "b.zip"
     with zipfile.ZipFile(archive_b, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name, content in entries.items():
-            info = zipfile.ZipInfo(name, date_time=(2000, 6, 15, 12, 0, 0))
+            info = zipfile.ZipInfo(f"src/{name}", date_time=(2000, 6, 15, 12, 0, 0))
             info.external_attr = 0o600 << 16
             zf.writestr(info, content)
 
@@ -291,7 +377,8 @@ def test_folder_content_hash_matches_compute_content_hash(tmp_path: Path) -> Non
 def test_folder_content_hash_skips_dotfiles(tmp_path: Path) -> None:
     """Same dotfile filter as `archive_save_folder` — otherwise
     a folder with `.DS_Store` would hash differently from its zip,
-    breaking the equivalence."""
+    breaking the equivalence. Pin wrapper to isolate the dotfile
+    filter from the folder-name-as-wrapper default."""
     src = tmp_path / "src"
     _populate(
         src,
@@ -305,7 +392,7 @@ def test_folder_content_hash_skips_dotfiles(tmp_path: Path) -> None:
     cleaned = tmp_path / "cleaned"
     _populate(cleaned, {"save.bin": b"real"})
 
-    assert folder_content_hash(src) == folder_content_hash(cleaned)
+    assert folder_content_hash(src, wrapper="W") == folder_content_hash(cleaned, wrapper="W")
 
 
 def test_folder_content_hash_changes_when_content_changes(tmp_path: Path) -> None:
@@ -314,11 +401,41 @@ def test_folder_content_hash_changes_when_content_changes(tmp_path: Path) -> Non
     src_b = tmp_path / "b"
     _populate(src_b, {"save.bin": b"version 2"})
 
-    assert folder_content_hash(src_a) != folder_content_hash(src_b)
+    # Pin wrapper so the assertion isolates content change from
+    # folder-name change (which would also flip the hash).
+    assert folder_content_hash(src_a, wrapper="W") != folder_content_hash(src_b, wrapper="W")
 
 
 def test_folder_content_hash_empty_folder(tmp_path: Path) -> None:
     src = tmp_path / "empty"
     src.mkdir()
     expected = hashlib.md5(b"", usedforsecurity=False).hexdigest()
+    # Wrapper irrelevant for empty folder — manifest has no entries.
     assert folder_content_hash(src) == expected
+
+
+def test_folder_content_hash_changes_when_wrapper_changes(tmp_path: Path) -> None:
+    """The wrapper name participates in the manifest — same content
+    under a different wrapper hashes differently. Catches regressions
+    where the wrapper accidentally drops out of the manifest."""
+    src = tmp_path / "src"
+    _populate(src, {"save.bin": b"identical content"})
+
+    assert folder_content_hash(src, wrapper="alpha") != folder_content_hash(src, wrapper="beta")
+
+
+def test_folder_content_hash_default_wrapper_is_folder_name(tmp_path: Path) -> None:
+    """Verify the default — `archive_save_folder` uses the source
+    folder's name as wrapper, and `folder_content_hash` must match
+    that when no explicit wrapper is passed."""
+    src = tmp_path / "RSPE"
+    _populate(src, {"save.bin": b"content"})
+
+    archive = tmp_path / "out.zip"
+    archive_save_folder(src, archive)
+
+    # Default wrapper (= src.name = "RSPE") must produce the same hash
+    # as compute_content_hash on the wrapper-prefixed zip.
+    assert folder_content_hash(src) == compute_content_hash(archive)
+    # And explicitly: passing wrapper="RSPE" matches the default.
+    assert folder_content_hash(src) == folder_content_hash(src, wrapper="RSPE")

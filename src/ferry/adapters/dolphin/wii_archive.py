@@ -1,17 +1,28 @@
 """Pack/unpack a Wii NAND save folder as a single zip + content-hash mirror.
 
-Wii saves at `<saves_root>/title/<TID_HIGH>/<TID_LOW>/data/` are folders
-of small binaries (`save.bin`, `banner.bin`, sometimes nested subdirs
-for game-specific data). RomM's `/api/saves` takes one blob per save
-record, so ferry bundles the folder as a zip per save.
+Wii saves at `<saves_root>/title/<TID_HIGH>/<TID_LOW>/` are folders
+of small binaries (`data/save.bin`, `data/banner.bin`, plus `content/`
+and any other subdirs Dolphin populates per title). RomM's `/api/saves`
+takes one blob per save record, so ferry bundles the title parent as a
+zip per save.
+
+**Zip layout — single wrapping directory at root.** Argosy's
+`unzipDirect` strips the first-level prefix unconditionally; a flat
+zip would have its first sub-dir mistakenly stripped on the Argosy
+side. Mirror Argosy's `zipFolderRecursive(folder, folder.name, zos)` —
+prefix every entry with `<src_folder.name>/`. Wrapper name is
+irrelevant to readers (gets stripped by name-anonymous prefix matching)
+but its presence is required.
 
 **The zip's bytes are deliberately NOT byte-stable.** We let Python's
 `zipfile` defaults (mtimes from disk, external_attr from file mode,
 ZIP_STORED for tiny files) do the talking. Hash matching across machines
 goes through `compute_content_hash`, which mirrors RomM's
 `assets_handler._compute_zip_hash` (sorted-name manifest of inner
-content), making archive-byte determinism unnecessary. See DESIGN.md
-§5.3 — `per_game_bundle` archetype.
+content) AND Argosy's `SaveArchiver.calculateFolderAsZipHash`. Three
+independent implementations converge on the same hash for the same
+folder content — that three-way invariant is what enables cross-tool
+dedup on RomM. See DESIGN.md §5.3 — `per_game_bundle` archetype.
 
 `compute_content_hash` is the ONLY identity function for these archives.
 A future contributor reaching for `md5_file(zip)` thinking it's stable
@@ -40,7 +51,13 @@ _IGNORED_DIR_NAMES: frozenset[str] = frozenset({"__MACOSX"})
 
 
 def archive_save_folder(src_folder: Path, dest_zip: Path) -> None:
-    """Build a zip of *src_folder* at *dest_zip*, recursive.
+    """Build a zip of *src_folder* at *dest_zip*, recursive, with wrapping dir.
+
+    Every entry's arcname is prefixed with `<src_folder.name>/` to
+    produce the single-wrapping-dir layout Argosy's `unzipDirect`
+    requires. Wrapper name itself is irrelevant — Argosy and ferry's
+    `extract_save_zip` both strip whatever the first entry's top-level
+    dir is — but its presence is required.
 
     Entries are added in relpath-sorted order for stable test output.
     OS-cruft files (`.DS_Store`, `Thumbs.db`, `desktop.ini`) and
@@ -56,24 +73,35 @@ def archive_save_folder(src_folder: Path, dest_zip: Path) -> None:
         for path in src_folder.rglob("*")
         if path.is_file() and not is_save_path_ignored(path.relative_to(src_folder))
     )
+    wrapper = src_folder.name
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_STORED) as zf:
         for relpath in entries:
-            zf.write(src_folder / relpath, arcname=relpath.as_posix())
+            arcname = f"{wrapper}/{relpath.as_posix()}"
+            zf.write(src_folder / relpath, arcname=arcname)
 
 
 def extract_save_zip(src_zip: Path, dest_folder: Path) -> None:
-    """Extract *src_zip* into *dest_folder*, creating dirs as needed.
+    """Extract *src_zip* into *dest_folder*, stripping the wrapping dir.
+
+    Mirror of Argosy's `SaveArchiver.unzipDirect`: capture the first
+    entry's top-level directory and strip that prefix from every
+    subsequent entry. Wrapper name is irrelevant; presence is what
+    matters. Entries that don't share the captured prefix are written
+    as-is (matches Argosy's tolerance for mixed layouts).
 
     Idempotent: existing files at the same paths are overwritten.
     Ignored files (see `_IGNORED_NAMES` / `_IGNORED_DIR_NAMES`) are
     silently skipped on extract too — symmetric with archive — so a
     zip carrying `.DS_Store` from a misbehaving uploader can't pollute
-    Dolphin's NAND tree. Refuses path-traversal entries.
+    Dolphin's NAND tree. Refuses path-traversal entries up-front
+    (`is_unsafe_zip_member` runs on the original entry name, before
+    strip — catches `wrapper/../../escape` because `..` is in parts).
     """
     dest_folder.mkdir(parents=True, exist_ok=True)
     output_root = dest_folder.resolve()
     with zipfile.ZipFile(src_zip, "r") as zf:
+        wrapper: str | None = None
         for info in zf.infolist():
             if info.is_dir():
                 continue
@@ -81,9 +109,20 @@ def extract_save_zip(src_zip: Path, dest_folder: Path) -> None:
                 raise ValueError(
                     f"refusing to extract unsafe path from {src_zip.name}: {info.filename!r}"
                 )
+            # Cruft check runs on the ORIGINAL filename — otherwise a
+            # `__MACOSX/save.bin` entry would set wrapper="__MACOSX",
+            # then strip leaves "save.bin", and the cruft marker is
+            # gone. Ignored check must see the path before strip.
             if is_save_path_ignored(Path(info.filename)):
                 continue
-            target = (dest_folder / info.filename).resolve()
+            if wrapper is None and "/" in info.filename:
+                wrapper = info.filename.split("/", 1)[0]
+            relname = info.filename
+            if wrapper is not None and relname.startswith(f"{wrapper}/"):
+                relname = relname[len(wrapper) + 1 :]
+            if not relname:
+                continue
+            target = (dest_folder / relname).resolve()
             if not is_within_dir(target, output_root):
                 raise ValueError(
                     f"refusing to extract {info.filename!r} from {src_zip.name}: "
@@ -94,23 +133,35 @@ def extract_save_zip(src_zip: Path, dest_folder: Path) -> None:
                 shutil.copyfileobj(src_f, dst_f)
 
 
-def folder_content_hash(src_folder: Path) -> str:
+def folder_content_hash(src_folder: Path, *, wrapper: str | None = None) -> str:
     """Compute RomM-style content_hash directly from a folder.
 
     Equivalent to `compute_content_hash(archive_save_folder(folder))`
     by construction: same sorted-by-relpath traversal, same per-file
     md5, same `name:hash` join, same outer md5. Same dotfile filter.
 
+    `wrapper` (default `src_folder.name`) is the wrapping-directory
+    prefix that `archive_save_folder` adds to every entry's arcname.
+    The manifest format includes that prefix per entry — so the hash
+    matches what RomM computes on the wrapped zip and what Argosy's
+    `calculateFolderAsZipHash` produces for the same folder. Pass an
+    explicit wrapper for round-trip tests where the producing folder
+    name differs from the canonical save folder.
+
     Used by the Wii walker so each `LocalSave.local_md5` matches what
     RomM would store on the corresponding zip upload — without paying
     the cost of zipping every walker iteration.
     """
+    if wrapper is None:
+        wrapper = src_folder.name
     entries = sorted(
         path.relative_to(src_folder)
         for path in src_folder.rglob("*")
         if path.is_file() and not is_save_path_ignored(path.relative_to(src_folder))
     )
-    file_hashes = [f"{relpath.as_posix()}:{md5_file(src_folder / relpath)}" for relpath in entries]
+    file_hashes = [
+        f"{wrapper}/{relpath.as_posix()}:{md5_file(src_folder / relpath)}" for relpath in entries
+    ]
     combined = "\n".join(file_hashes)
     return hashlib.md5(combined.encode(), usedforsecurity=False).hexdigest()
 
@@ -127,10 +178,14 @@ def compute_content_hash(zip_path: Path) -> str:
     `content_hash` exactly when content is unchanged, regardless of
     archive-byte drift.
 
-    Must stay in lockstep with RomM's algorithm — if RomM ever changes
-    the per-entry separator, sort key, or outer hash, ferry's
-    classify-time hash equality silently breaks (falls through to
-    mtime/last_sync_md5, still correct but degraded).
+    **Three-way invariant.** This function, RomM's
+    `assets_handler._compute_zip_hash`, and Argosy's
+    `SaveArchiver.calculateFolderAsZipHash` must all produce the same
+    digest for the same folder content. That convergence is what makes
+    cross-tool dedup possible on RomM. If any party changes the
+    per-entry separator, sort key, or outer hash, classify-time hash
+    equality silently breaks (falls through to mtime/last_sync_md5,
+    still correct but degraded) and cross-tool dedup stops working.
     """
     with zipfile.ZipFile(zip_path, "r") as zf:
         file_hashes: list[str] = []

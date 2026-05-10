@@ -26,7 +26,6 @@ import respx
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall
 from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DolphinTool
 from ferry.adapters.dolphin.wii_archive import (
-    archive_save_folder,
     compute_content_hash,
     folder_content_hash,
 )
@@ -41,7 +40,11 @@ BASE_URL = "https://romm.example.tld"
 _TITLE_ID = 0x00010000524D3345
 _TID_HIGH = "00010000"
 _TID_LOW = "524d3345"
-_SAVE_FILENAME = f"{_TID_HIGH}-{_TID_LOW}.zip"
+# v3.7: filename + slot are <rom_base_name>; default-rom output_path
+# is "wii/Metroid Prime 3 (USA).rvz", stem "Metroid Prime 3 (USA)".
+_ROM_BASE_NAME = "Metroid Prime 3 (USA)"
+_SAVE_FILENAME = f"{_ROM_BASE_NAME}.zip"
+_DOLPHIN_WII_TAG = "dolphin_wii"
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +111,19 @@ def _plant_save_folder(
     title_id_high: str = _TID_HIGH,
     title_id_low: str = _TID_LOW,
 ) -> Path:
-    folder = wii_saves_root / title_id_high / title_id_low / "data"
-    folder.mkdir(parents=True, exist_ok=True)
+    """Plant *files* under the title parent `<HIGH>/<LOW>/`.
+
+    Tests should typically nest under `data/` (real Wii layout). v3.7
+    walker zips the whole title parent recursively. Returns the title
+    parent (matches what the walker sets as `LocalSave.local_path`).
+    """
+    title_parent = wii_saves_root / title_id_high / title_id_low
+    title_parent.mkdir(parents=True, exist_ok=True)
     for relpath, content in files.items():
-        target = folder / relpath
+        target = title_parent / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-    return folder
+    return title_parent
 
 
 def _make_tool(headers: dict[str, DiscHeader]) -> DolphinTool:
@@ -135,8 +144,8 @@ def _server_save(
     *,
     save_id: int,
     rom_id: int,
-    emulator: str = "dolphin",
-    slot: str = "default",
+    emulator: str = _DOLPHIN_WII_TAG,
+    slot: str = _ROM_BASE_NAME,
     file_name: str = _SAVE_FILENAME,
     file_size: int = 2048,
     md5: str = "deadbeef" * 4,
@@ -173,13 +182,17 @@ def _make_backend(
     return backend, http
 
 
-def _build_in_memory_zip(entries: dict[str, bytes]) -> bytes:
-    """Build a zip with the given entries; matches what the upload flow
-    would produce locally. Used as the server-side download payload."""
+def _build_in_memory_zip(entries: dict[str, bytes], *, wrapper: str = _TID_LOW) -> bytes:
+    """Build a wrapper-prefixed zip with the given entries; matches what
+    `archive_save_folder` would produce locally and what RomM/Argosy
+    would see on the server. Used as the server-side download payload.
+    Pass `wrapper=""` for a flat zip (defensive test of the no-wrapper
+    extract branch)."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
         for name in sorted(entries):
-            zf.writestr(name, entries[name])
+            arcname = f"{wrapper}/{name}" if wrapper else name
+            zf.writestr(arcname, entries[name])
     return buf.getvalue()
 
 
@@ -207,16 +220,20 @@ def test_constructor_rejects_install_without_wii_saves_root(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_record_belongs_filters_to_wii_platform(tmp_path: Path) -> None:
-    """GC and Wii roms with the same `dolphin` emulator tag — predicate
-    accepts only the Wii platform."""
+def test_record_belongs_accepts_dolphin_wii_for_wii_platform(tmp_path: Path) -> None:
+    """v3.7: Wii records carry the `dolphin_wii` tag; GC keeps `dolphin`.
+    The platform check stays as defensive belt-and-suspenders against
+    future tag overloading."""
     install = _make_install(wii_saves_root=tmp_path / "wii_root")
     backend, _ = _make_backend(install, roms_base=tmp_path)
     gc_rom = _make_rom(rom_id=1, platform="ngc", output_path="gc/Metroid.rvz")
     wii_rom = _make_rom(rom_id=2, platform="wii")
 
-    assert backend._record_belongs_to_backend(wii_rom, "dolphin") is True
-    assert backend._record_belongs_to_backend(gc_rom, "dolphin") is False
+    assert backend._record_belongs_to_backend(wii_rom, _DOLPHIN_WII_TAG) is True
+    # The legacy `dolphin` tag is owned by the GC backend now.
+    assert backend._record_belongs_to_backend(wii_rom, "dolphin") is False
+    # GC platform never matches the Wii backend regardless of tag.
+    assert backend._record_belongs_to_backend(gc_rom, _DOLPHIN_WII_TAG) is False
     assert backend._record_belongs_to_backend(wii_rom, "retroarch") is False
 
 
@@ -225,15 +242,17 @@ def test_record_belongs_filters_to_wii_platform(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_local_path_returns_save_folder(tmp_path: Path) -> None:
+def test_resolve_local_path_returns_title_parent(tmp_path: Path) -> None:
     wii_root = tmp_path / "wii_root"
     install = _make_install(wii_saves_root=wii_root)
     rom = _make_rom(rom_id=1)
     rp = _plant_rom_file(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
 
     backend, _ = _make_backend(install, roms_base=tmp_path, headers={str(rp): _wii_header()})
-    dest = backend._resolve_local_path(rom, "dolphin", "default", _SAVE_FILENAME)
-    assert dest == wii_root / _TID_HIGH / _TID_LOW / "data"
+    dest = backend._resolve_local_path(rom, _DOLPHIN_WII_TAG, _ROM_BASE_NAME, _SAVE_FILENAME)
+    # v3.7: title parent (no /data suffix), recursive — includes
+    # data/, content/, and any other Dolphin-populated subdirs.
+    assert dest == wii_root / _TID_HIGH / _TID_LOW
 
 
 def test_resolve_local_path_failed_when_disc_header_missing(tmp_path: Path) -> None:
@@ -244,7 +263,9 @@ def test_resolve_local_path_failed_when_disc_header_missing(tmp_path: Path) -> N
     from ferry.services.save_backend import SaveSyncResult
 
     result = SaveSyncResult()
-    dest = backend._resolve_local_path(rom, "dolphin", "default", _SAVE_FILENAME, result)
+    dest = backend._resolve_local_path(
+        rom, _DOLPHIN_WII_TAG, _ROM_BASE_NAME, _SAVE_FILENAME, result
+    )
     assert dest is None
     assert len(result.failed) == 1
     assert "cannot read disc header" in result.failed[0]
@@ -261,7 +282,9 @@ def test_resolve_local_path_failed_when_header_lacks_title_id(tmp_path: Path) ->
     from ferry.services.save_backend import SaveSyncResult
 
     result = SaveSyncResult()
-    dest = backend._resolve_local_path(rom, "dolphin", "default", _SAVE_FILENAME, result)
+    dest = backend._resolve_local_path(
+        rom, _DOLPHIN_WII_TAG, _ROM_BASE_NAME, _SAVE_FILENAME, result
+    )
     assert dest is None
     assert len(result.failed) == 1
     assert "no title_id" in result.failed[0]
@@ -278,8 +301,8 @@ def test_upload_zips_save_folder_and_posts_zip(tmp_path: Path) -> None:
     install = _make_install(wii_saves_root=wii_root)
     rom = _make_rom(rom_id=1)
     rp = _plant_rom_file(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
-    save_folder = _plant_save_folder(
-        wii_root, {"save.bin": b"main save bytes", "banner.bin": b"banner bytes"}
+    title_parent = _plant_save_folder(
+        wii_root, {"data/save.bin": b"main save bytes", "data/banner.bin": b"banner bytes"}
     )
 
     captured: dict = {}
@@ -302,7 +325,7 @@ def test_upload_zips_save_folder_and_posts_zip(tmp_path: Path) -> None:
     # boundary-delimited content and reading it as a zip should yield
     # the same content_hash the walker computed locally.
     assert b"PK\x03\x04" in captured["body"]  # zip magic bytes present
-    expected_hash = folder_content_hash(save_folder)
+    expected_hash = folder_content_hash(title_parent)
     assert result.updated_roms[1].saves[0].last_sync_md5 == expected_hash
 
 
@@ -316,7 +339,7 @@ def test_upload_temp_zip_is_cleaned_up_after_post(tmp_path: Path) -> None:
     install = _make_install(wii_saves_root=wii_root)
     rom = _make_rom(rom_id=1)
     rp = _plant_rom_file(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
-    _plant_save_folder(wii_root, {"save.bin": b"x"})
+    _plant_save_folder(wii_root, {"data/save.bin": b"x"})
 
     respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
     respx.post(f"{BASE_URL}/api/saves").mock(
@@ -346,8 +369,12 @@ def test_download_extracts_zip_into_save_folder(tmp_path: Path) -> None:
     rp = _plant_rom_file(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
     state = _make_state([rom])
 
+    # Server payload: wrapper-prefixed zip, as `archive_save_folder`
+    # would have produced (and as Argosy would upload too). Extract on
+    # ferry's side strips the wrapper, lands files at their original
+    # relpaths inside the title parent.
     payload = _build_in_memory_zip(
-        {"save.bin": b"server save bytes", "banner.bin": b"server banner"}
+        {"data/save.bin": b"server save bytes", "data/banner.bin": b"server banner"}
     )
     server_content_hash = compute_content_hash_from_bytes(payload)
     server = _server_save(save_id=42, rom_id=1, file_size=len(payload), md5=server_content_hash)
@@ -366,15 +393,15 @@ def test_download_extracts_zip_into_save_folder(tmp_path: Path) -> None:
 
     assert result.downloaded == 1
     assert result.failed == []
-    save_folder = wii_root / _TID_HIGH / _TID_LOW / "data"
-    assert (save_folder / "save.bin").read_bytes() == b"server save bytes"
-    assert (save_folder / "banner.bin").read_bytes() == b"server banner"
+    title_parent = wii_root / _TID_HIGH / _TID_LOW
+    assert (title_parent / "data" / "save.bin").read_bytes() == b"server save bytes"
+    assert (title_parent / "data" / "banner.bin").read_bytes() == b"server banner"
 
     record = result.updated_roms[1].saves[0]
     # `_local_md5_from_download` prefers server.content_hash → matches
     # what the walker would compute on the extracted folder.
     assert record.last_sync_md5 == server_content_hash
-    assert record.last_sync_md5 == folder_content_hash(save_folder)
+    assert record.last_sync_md5 == folder_content_hash(title_parent)
 
 
 @respx.mock
@@ -387,7 +414,7 @@ def test_download_temp_zip_is_cleaned_up_after_extract(tmp_path: Path) -> None:
     rp = _plant_rom_file(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
     state = _make_state([rom])
 
-    payload = _build_in_memory_zip({"save.bin": b"x"})
+    payload = _build_in_memory_zip({"data/save.bin": b"x"})
     server = _server_save(save_id=42, rom_id=1, file_size=len(payload))
     respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[server]))
     respx.get(f"{BASE_URL}/api/saves/42/content").mock(
@@ -453,13 +480,13 @@ def test_local_md5_falls_back_to_folder_hash_when_server_omits_content_hash(
     rp = _plant_rom_file(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
     state = _make_state([rom])
 
-    payload = _build_in_memory_zip({"save.bin": b"server"})
+    payload = _build_in_memory_zip({"data/save.bin": b"server"})
     # Server response with NO content_hash key — simulate 4.8.1 PUT bug.
     server = {
         "id": 42,
         "rom_id": 1,
-        "emulator": "dolphin",
-        "slot": "default",
+        "emulator": _DOLPHIN_WII_TAG,
+        "slot": _ROM_BASE_NAME,
         "file_name": _SAVE_FILENAME,
         "file_size_bytes": len(payload),
         "updated_at": "2026-04-25T12:00:00Z",
@@ -477,9 +504,9 @@ def test_local_md5_falls_back_to_folder_hash_when_server_omits_content_hash(
         result = backend.sync(state)
 
     assert result.downloaded == 1
-    save_folder = wii_root / _TID_HIGH / _TID_LOW / "data"
+    title_parent = wii_root / _TID_HIGH / _TID_LOW
     record = result.updated_roms[1].saves[0]
-    assert record.last_sync_md5 == folder_content_hash(save_folder)
+    assert record.last_sync_md5 == folder_content_hash(title_parent)
 
 
 # ---------------------------------------------------------------------------
@@ -497,14 +524,14 @@ def test_round_trip_upload_then_redownload_is_byte_stable(tmp_path: Path) -> Non
     """
     wii_root_a = tmp_path / "device_a" / "wii_root"
     wii_root_b = tmp_path / "device_b" / "wii_root"
-    save_files = {"save.bin": b"shared progress", "banner.bin": b"banner data"}
+    save_files = {"data/save.bin": b"shared progress", "data/banner.bin": b"banner data"}
 
     # Device A: has the save folder; uploads.
     install_a = _make_install(wii_saves_root=wii_root_a)
     rom_a = _make_rom(rom_id=1)
     rp_a = _plant_rom_file(tmp_path / "device_a" / "roms", "wii/Metroid Prime 3 (USA).rvz")
-    save_folder_a = _plant_save_folder(wii_root_a, save_files)
-    expected_hash = folder_content_hash(save_folder_a)
+    title_parent_a = _plant_save_folder(wii_root_a, save_files)
+    expected_hash = folder_content_hash(title_parent_a)
 
     captured_zip: dict = {}
 
@@ -558,10 +585,10 @@ def test_round_trip_upload_then_redownload_is_byte_stable(tmp_path: Path) -> Non
         result_b = backend_b.sync(_make_state([rom_b]))
 
     assert result_b.downloaded == 1
-    save_folder_b = wii_root_b / _TID_HIGH / _TID_LOW / "data"
-    assert (save_folder_b / "save.bin").read_bytes() == save_files["save.bin"]
-    assert (save_folder_b / "banner.bin").read_bytes() == save_files["banner.bin"]
-    assert folder_content_hash(save_folder_b) == expected_hash
+    title_parent_b = wii_root_b / _TID_HIGH / _TID_LOW
+    assert (title_parent_b / "data" / "save.bin").read_bytes() == save_files["data/save.bin"]
+    assert (title_parent_b / "data" / "banner.bin").read_bytes() == save_files["data/banner.bin"]
+    assert folder_content_hash(title_parent_b) == expected_hash
     assert result_b.updated_roms[1].saves[0].last_sync_md5 == expected_hash
 
 
@@ -572,26 +599,27 @@ def test_round_trip_upload_then_redownload_is_byte_stable(tmp_path: Path) -> Non
 
 def test_delete_for_rom_trashes_wii_save_files(tmp_path: Path) -> None:
     """`_saves_root` returns wii_saves_root, so the trash relpath
-    structure is `<trash>/saves/<HIGH>/<LOW>/data/...`."""
+    structure is `<trash>/saves/<HIGH>/<LOW>/...` (title parent)."""
     wii_root = tmp_path / "wii_root"
     install = _make_install(wii_saves_root=wii_root)
     rom = _make_rom(rom_id=1)
     rp = _plant_rom_file(tmp_path, "wii/Metroid Prime 3 (USA).rvz")
-    save_folder = _plant_save_folder(wii_root, {"save.bin": b"x", "banner.bin": b"y"})
+    title_parent = _plant_save_folder(wii_root, {"data/save.bin": b"x", "data/banner.bin": b"y"})
 
     backend, _ = _make_backend(install, roms_base=tmp_path, headers={str(rp): _wii_header()})
     trash = tmp_path / "trash"
     count, warnings = backend.delete_for_rom(rom, trash)
 
-    # Walker emits one LocalSave per Wii title (slot=default, local_path=folder),
+    # Walker emits one LocalSave per Wii title (local_path=title parent),
     # so delete_for_rom moves the folder once.
     assert count == 1
     assert warnings == []
-    # The save folder is gone from disk.
-    assert not save_folder.exists()
+    # The title parent is gone from disk.
+    assert not title_parent.exists()
     # And lives under <trash>/saves at its relpath.
-    relocated = trash / "saves" / _TID_HIGH / _TID_LOW / "data"
+    relocated = trash / "saves" / _TID_HIGH / _TID_LOW
     assert relocated.exists()
+    assert (relocated / "data" / "save.bin").read_bytes() == b"x"
 
 
 # ---------------------------------------------------------------------------
@@ -619,11 +647,10 @@ def compute_content_hash_from_bytes(zip_bytes: bytes) -> str:
 def test_helper_compute_content_hash_from_bytes_matches_compute_content_hash(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "save.bin").write_bytes(b"main save bytes")
-    (src / "banner.bin").write_bytes(b"banner bytes")
+    # Use a wrapper-prefixed zip that mirrors `archive_save_folder`'s
+    # output (zips include a single wrapping dir per the v3.7 layout).
+    payload = _build_in_memory_zip({"save.bin": b"main save bytes", "banner.bin": b"banner bytes"})
     archive = tmp_path / "out.zip"
-    archive_save_folder(src, archive)
+    archive.write_bytes(payload)
 
-    assert compute_content_hash_from_bytes(archive.read_bytes()) == compute_content_hash(archive)
+    assert compute_content_hash_from_bytes(payload) == compute_content_hash(archive)

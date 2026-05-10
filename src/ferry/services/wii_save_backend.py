@@ -1,26 +1,31 @@
-"""Wii NAND save sync backend via standalone Dolphin (v3.6).
+"""Wii NAND save sync backend via standalone Dolphin.
 
 Subclass of `SaveBackendBase` (`services/save_backend_base.py`) — the
 shared sync/plan/delete machinery lives there. This module supplies
 Wii-specific glue:
 
 - `WiiSaveBackend` — the four hook methods, plus the three transform
-  hooks introduced in ck3 (`_pre_upload_archive`,
-  `_download_io_context`, `_local_md5_from_download`) since Wii saves
-  travel as zip blobs but live as folders on disk.
+  hooks (`_pre_upload_archive`, `_download_io_context`,
+  `_local_md5_from_download`) since Wii saves travel as zip blobs but
+  live as folders on disk.
 
 The walker (`adapters.dolphin.wii_saves.list_local_saves`) emits one
 LocalSave per Wii title with a save folder present, with
-`local_path` pointing at the folder itself and `local_md5` set to
-`folder_content_hash` (matches RomM's manifest hash for the
-corresponding zip — see `wii_archive` for the equivalence). The
+`local_path` pointing at the title parent folder and `local_md5` set
+to `folder_content_hash` (matches RomM's manifest hash for the
+corresponding zip — and Argosy's `calculateFolderAsZipHash` for the
+same folder; see `wii_archive` for the three-way equivalence). The
 backend's transform hooks turn that folder→zip on upload and
 zip→folder on download; the base class never sees the zip's bytes
 directly.
 
-Predicate widening (ck3): the emulator tag `"dolphin"` is shared
-with the GameCube backend; `_record_belongs_to_backend` filters by
-`rom.platform_slug == "wii"` so each backend only owns its platform.
+**v3.7 Argosy compat (ck7.1):** emulator tag is `dolphin_wii` (was
+`dolphin` in v3.6), distinct from the GameCube backend's `dolphin`.
+Filename + slot are both `<rom_base_name>` per Argosy's symmetry
+expectation. `_record_belongs_to_backend` still cross-checks
+`platform_slug == "wii"` defensively even though the tag itself now
+disambiguates from GC — costs nothing and catches future taxonomy
+drift cheaply.
 """
 
 from __future__ import annotations
@@ -55,7 +60,7 @@ from ferry.services.save_backend import SaveSyncResult
 from ferry.services.save_backend_base import SaveBackendBase
 
 _WII_PLATFORM_DIR = "wii"
-_DOLPHIN_EMULATOR_LABEL = "dolphin"
+_DOLPHIN_WII_EMULATOR_LABEL = "dolphin_wii"
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +69,7 @@ class WiiSaveBackend(SaveBackendBase):
     """Sync standalone-Dolphin's Wii NAND saves with RomM's `/api/saves`."""
 
     backend_label = "Dolphin (Wii)"
-    default_slot = "default"
+    default_slot = "default"  # unused: walker always sets a real slot (<rom_base_name>)
 
     def __init__(
         self,
@@ -105,11 +110,11 @@ class WiiSaveBackend(SaveBackendBase):
         )
 
     def _record_belongs_to_backend(self, rom: RomState, emulator: str) -> bool:
-        # The `dolphin` emulator tag is shared with the GameCube backend;
-        # disambiguate by platform so GC server records don't get routed
-        # into the Wii walker / extract path.
+        # As of v3.7, the `dolphin_wii` tag uniquely identifies Wii records
+        # (GC uses `dolphin`); the platform check is defensive belt-and-
+        # suspenders against future tag overloading.
         return (
-            emulator == _DOLPHIN_EMULATOR_LABEL
+            emulator == _DOLPHIN_WII_EMULATOR_LABEL
             and resolve_platform_dir(rom.platform_slug) == _WII_PLATFORM_DIR
         )
 
@@ -126,12 +131,14 @@ class WiiSaveBackend(SaveBackendBase):
         save_filename: str,
         result: SaveSyncResult | None = None,
     ) -> Path | None:
-        """Canonical save folder for *rom*: `<wii_root>/<HIGH>/<LOW>/data`.
+        """Canonical save folder for *rom*: `<wii_root>/<HIGH>/<LOW>/`.
 
-        Used by the base-class path probe (does the folder exist?) and
-        by `_do_download` as the `final_dest` arg to the IO-context hook.
-        Failures (missing rom file, dolphin-tool failure, header without
-        title_id) route into `result.failed` and return None.
+        Title parent folder, recursive — includes `data/`, `content/`,
+        and any other subdirs Dolphin populates. Used by the base-class
+        path probe (does the folder exist?) and by `_do_download` as
+        the `final_dest` arg to the IO-context hook. Failures (missing
+        rom file, dolphin-tool failure, header without title_id) route
+        into `result.failed` and return None.
         """
         header = self._header_for_rom(rom)
         if header is None:
