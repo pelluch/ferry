@@ -54,9 +54,9 @@ from ferry.adapters.romm import RommApi
 from ferry.adapters.romm.http import DownloadResult
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.save_local import LocalSave
-from ferry.domain.state import LibraryState, RomState
+from ferry.domain.state import LibraryState, RomState, SaveRecord
 from ferry.services.save_backend import SaveSyncResult
-from ferry.services.save_backend_base import SaveBackendBase
+from ferry.services.save_backend_base import SaveBackendBase, strip_datetime_tag
 
 _GAMECUBE_PLATFORM_DIR = "gc"
 _DOLPHIN_EMULATOR_LABEL = "dolphin"
@@ -245,6 +245,44 @@ class GameCubeSaveBackend(SaveBackendBase):
         gci_paths, _ = match_rom_gcis(self._install, header, rom=rom)
         rom_base_name = Path(rom.primary_output.path).stem
         return files_content_hash(gci_paths, wrapper=rom_base_name)
+
+    # ------------------------------------------------------------------
+    # Lost-local probe override — Card A is a SHARED dir
+    # ------------------------------------------------------------------
+
+    def _probe_local_path_for_server_only(
+        self,
+        rom: RomState,
+        emulator: str,
+        slot: str,
+        local: LocalSave | None,
+        server: dict[str, Any] | None,
+        prev: SaveRecord | None,
+    ) -> tuple[bool | None, float | None, str | None]:
+        """Override the base probe — Card A always exists with other ROMs' GCIs.
+
+        The base implementation stats `_resolve_local_path` (which returns
+        `<saves_root>/<region>/Card A/`) and reports whether it exists.
+        That works for Wii (path is the rom-specific title-parent folder
+        — gone if the rom's saves are gone), but not for GC ck2's bundle
+        model: Card A is shared across every GC ROM that has saves, so
+        `dir.stat()` succeeds even when THIS rom has zero matching GCIs.
+        Classify then thinks "local exists, skip" instead of triggering
+        a download to restore.
+
+        Walker contract: emits a LocalSave iff `match_rom_gcis` returned
+        ≥1 path. The base probe is only invoked when the walker emitted
+        no LocalSave for this `(rom, emulator, slot)` key — by definition,
+        no matching GCIs for this rom. Always report lost-local.
+        """
+        if local is not None or server is None:
+            return None, None, None
+        candidate_filename = (
+            prev.save_filename
+            if prev is not None
+            else strip_datetime_tag(server.get("file_name") or "") or None
+        )
+        return False, None, candidate_filename
 
     # ------------------------------------------------------------------
     # delete_for_rom — override: walk-emitted local_path is the saves_root

@@ -747,7 +747,14 @@ def test_sync_redownloads_when_local_file_was_deleted_after_prior_sync(
     user/system removed the local .gci, and now the walker finds
     nothing. With path-aware classify, we detect the empty resolved
     path and download to restore. Server payload is the v3.7 bundle
-    zip; restored file lands in Card A."""
+    zip; restored file lands in Card A.
+
+    Crucially: `<region>/Card A/` is populated with UNRELATED ROMs'
+    GCIs, mirroring the real-world live-test case. The base probe
+    `dir.stat()` would succeed and report "local fine" — only the
+    GC backend's override, which checks `match_rom_gcis` directly,
+    correctly reports lost-local.
+    """
     saves_root = tmp_path / "GC"
     install = _make_install(saves_root)
     roms_base = tmp_path / "roms"
@@ -769,6 +776,13 @@ def test_sync_redownloads_when_local_file_was_deleted_after_prior_sync(
         ),
     )
     rp = _plant_rom_file(roms_base, "gc/Eternal Darkness (USA).rvz")
+    # Plant unrelated GCIs in Card A to make the SHARED directory exist
+    # and be non-empty — pins the regression: base `dir.stat()` probe
+    # would report "exists" and skip download. The override re-runs
+    # match_rom_gcis (filtered by GEDE prefix) → no matches for Eternal
+    # Darkness even though the dir is full of other games.
+    _plant_gci(saves_root / "USA" / "Card A", "01-GM8E-MetroidPrime A.gci")
+    _plant_gci(saves_root / "USA" / "Card A", "01-GALE-smashbros.gci")
     state = _make_state([rom])
 
     payload = _build_bundle_zip(
@@ -808,6 +822,69 @@ def test_sync_redownloads_when_local_file_was_deleted_after_prior_sync(
     assert result.downloaded == 1, "stale-prior + lost-local should re-download to restore"
     dest = saves_root / "USA" / "Card A" / "01-GEDE-Eternal Darkness.gci"
     assert dest.is_file()
+    # Other ROMs' GCIs still present — extract didn't clobber the directory.
+    assert (saves_root / "USA" / "Card A" / "01-GM8E-MetroidPrime A.gci").is_file()
+    assert (saves_root / "USA" / "Card A" / "01-GALE-smashbros.gci").is_file()
+
+
+@respx.mock
+def test_sync_redownloads_with_no_prior_when_card_a_has_other_roms_gcis(
+    tmp_path: Path,
+) -> None:
+    """Same as the prior-record case but with NO prior SaveRecord —
+    the user wiped state.json entirely. Server still has the bundle;
+    the lost-local probe must still trigger a download.
+
+    Mirrors the user's live-test scenario: deleted local GCI, tried
+    state.json edits, nothing restored — because the base probe saw
+    the populated Card A and reported "local fine"."""
+    saves_root = tmp_path / "GC"
+    install = _make_install(saves_root)
+    roms_base = tmp_path / "roms"
+
+    rom = _make_rom(rom_id=42, output_path="gc/Eternal Darkness (USA).rvz")  # no prior saves
+    rp = _plant_rom_file(roms_base, "gc/Eternal Darkness (USA).rvz")
+    # Card A populated with OTHER ROMs' GCIs.
+    _plant_gci(saves_root / "USA" / "Card A", "01-GM8E-MetroidPrime A.gci")
+    state = _make_state([rom])
+
+    payload = _build_bundle_zip(
+        {"01-GEDE-Eternal Darkness.gci": b"\x00" * 122944},
+        wrapper="Eternal Darkness (USA)",
+    )
+    payload_hash = compute_content_hash_from_bytes(payload)
+
+    respx.get(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                _server_save(
+                    save_id=70,
+                    rom_id=42,
+                    slot="Eternal Darkness (USA)",
+                    file_name="Eternal Darkness (USA).zip",
+                    file_size=len(payload),
+                    md5=payload_hash,
+                )
+            ],
+        )
+    )
+    respx.post(f"{BASE_URL}/api/saves/70/downloaded").mock(
+        return_value=httpx.Response(200, json={"id": 70})
+    )
+    respx.get(f"{BASE_URL}/api/saves/70/content").mock(
+        return_value=httpx.Response(200, content=payload)
+    )
+
+    headers = {str(rp): DiscHeader(game_code="GEDE", maker_code="01", region="NTSC-U")}
+    backend, http = _make_backend(install, roms_base=roms_base, headers=headers)
+    with http:
+        result = backend.sync(state)
+
+    assert result.downloaded == 1, (
+        "no-prior + lost-local + populated Card A should still download to restore"
+    )
+    assert (saves_root / "USA" / "Card A" / "01-GEDE-Eternal Darkness.gci").is_file()
 
 
 # ---------------------------------------------------------------------------
