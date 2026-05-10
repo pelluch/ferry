@@ -699,6 +699,125 @@ def test_upload_409_skips_with_warning_and_preserves_prior(tmp_path: Path) -> No
 
 
 @respx.mock
+def test_upload_put_404_with_romm_detail_falls_back_to_post(tmp_path: Path) -> None:
+    """When PUT /api/saves/{id} returns 404 with RomM's `{"detail": ...}`
+    JSON body, the server-side save was deleted out of band (e.g., user
+    cleaned up via web UI). Drop the stale `server_save_id` and POST as
+    a new record. Surface a warning so the user knows local state had
+    drifted from the server."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    (saves_dir / "snes9x" / "Mario.srm").write_bytes(b"local-progress")
+    install = _make_install(saves_dir)
+    # Local state remembers a server_save_id that the server no longer has.
+    prior = SaveRecord(
+        emulator="retroarch-snes9x",
+        slot="default",
+        save_filename="Mario.srm",
+        last_sync_md5="aa" * 16,
+        last_sync_server_size=1024,
+        last_sync_server_updated_at="2026-04-01T00:00:00Z",
+        last_synced_at="2026-04-01T00:00:00Z",
+        server_save_id=99,
+    )
+    rom = _make_rom(rom_id=1, saves=(prior,))
+    state = _make_state([rom])
+
+    # Server fetch returns no records (user deleted the save from RomM).
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
+    put_route = respx.put(f"{BASE_URL}/api/saves/99").mock(
+        return_value=httpx.Response(404, json={"detail": "Save with ID 99 not found"})
+    )
+    post_route = respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(
+            200,
+            json=_server_save(save_id=200, rom_id=1, file_name="Mario.srm"),
+        )
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert put_route.called
+    assert post_route.called
+    assert result.uploaded == 1
+    assert result.failed == []
+    # User-visible warning surfaces the recovery so silent drift doesn't
+    # accumulate unnoticed.
+    assert any("no longer exists" in w and "99" in w for w in result.warnings)
+    # New SaveRecord points at the freshly-created server id.
+    assert result.updated_roms[1].saves[0].server_save_id == 200
+
+
+@respx.mock
+def test_upload_put_404_without_json_detail_does_not_retry(tmp_path: Path) -> None:
+    """A 404 without a parseable RomM `detail` body — proxy 404, gateway
+    error, wrong base URL, etc. — must NOT trigger the POST fallback.
+    Re-creating saves at a misconfigured endpoint silently could be
+    catastrophic. Surface as an upload failure instead."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    (saves_dir / "snes9x" / "Mario.srm").write_bytes(b"local-progress")
+    install = _make_install(saves_dir)
+    prior = SaveRecord(
+        emulator="retroarch-snes9x",
+        slot="default",
+        save_filename="Mario.srm",
+        last_sync_md5="aa" * 16,
+        last_sync_server_size=1024,
+        last_sync_server_updated_at="2026-04-01T00:00:00Z",
+        last_synced_at="2026-04-01T00:00:00Z",
+        server_save_id=99,
+    )
+    rom = _make_rom(rom_id=1, saves=(prior,))
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
+    # 404 with HTML body — typical of a reverse proxy that can't reach RomM.
+    put_route = respx.put(f"{BASE_URL}/api/saves/99").mock(
+        return_value=httpx.Response(404, content=b"<html>nginx 404</html>")
+    )
+    post_route = respx.post(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200))
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert put_route.called
+    assert not post_route.called  # critical — no silent retry
+    assert result.uploaded == 0
+    assert len(result.failed) == 1
+    assert "Mario" in result.failed[0]
+
+
+@respx.mock
+def test_upload_post_404_does_not_loop(tmp_path: Path) -> None:
+    """If the original upload was already a POST (no `server_save_id` in
+    state) and it returns 404 with a RomM detail body, we must NOT retry
+    as POST again — that would loop. Surface as failure."""
+    saves_dir = tmp_path / "saves"
+    (saves_dir / "snes9x").mkdir(parents=True)
+    (saves_dir / "snes9x" / "Mario.srm").write_bytes(b"local-progress")
+    install = _make_install(saves_dir)
+    rom = _make_rom(rom_id=1)  # no prior save → POST path
+    state = _make_state([rom])
+
+    respx.get(f"{BASE_URL}/api/saves").mock(return_value=httpx.Response(200, json=[]))
+    post_route = respx.post(f"{BASE_URL}/api/saves").mock(
+        return_value=httpx.Response(404, json={"detail": "ROM not found"})
+    )
+
+    backend, http = _make_backend(install)
+    with http:
+        result = backend.sync(state)
+
+    assert post_route.call_count == 1  # called once, not retried
+    assert result.uploaded == 0
+    assert len(result.failed) == 1
+
+
+@respx.mock
 def test_upload_failure_records_in_result(tmp_path: Path) -> None:
     saves_dir = tmp_path / "saves"
     (saves_dir / "snes9x").mkdir(parents=True)

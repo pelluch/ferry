@@ -36,7 +36,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from ferry.adapters.romm import RommApi, RommApiError, RommConflictError
+from ferry.adapters.romm import RommApi, RommApiError, RommConflictError, RommNotFoundError
 from ferry.adapters.romm.http import DownloadResult
 from ferry.domain.iso_time import now_iso, parse_iso_to_epoch
 from ferry.domain.save_conflicts import Classification, classify
@@ -870,14 +870,40 @@ class SaveBackendBase(ABC):
         save_id = (server or {}).get("id") or (prev.server_save_id if prev else None)
         try:
             with self._pre_upload_archive(rom, local) as upload_path:
-                response = self._api.upload_save(
-                    rom.rom_id,
-                    upload_path,
-                    emulator=local.emulator,
-                    save_id=save_id,
-                    device_id=self._device_id,
-                    slot=local.slot,
-                )
+                try:
+                    response = self._api.upload_save(
+                        rom.rom_id,
+                        upload_path,
+                        emulator=local.emulator,
+                        save_id=save_id,
+                        device_id=self._device_id,
+                        slot=local.slot,
+                    )
+                except RommNotFoundError as exc:
+                    # PUT-404 recovery: server-side save was deleted out of band
+                    # (e.g., user cleaned up via the RomM web UI) but our local
+                    # state still remembers `server_save_id`. Drop the stale id
+                    # and POST a new record. Gate on `payload_detail` (RomM's
+                    # JSON `{"detail": ...}` shape) so transport-layer 404s —
+                    # proxy can't reach RomM, wrong base URL, etc. — still fail
+                    # loudly instead of silently re-creating saves at the wrong
+                    # endpoint. `save_id is None` means we already POSTed and
+                    # got 404 — re-trying as POST again would loop, so re-raise.
+                    if save_id is None or exc.payload_detail is None:
+                        raise
+                    result.warnings.append(
+                        f"upload {rom.name} ({local.save_filename}): server save id "
+                        f"{save_id} no longer exists ({exc.payload_detail}); "
+                        f"creating a new record"
+                    )
+                    response = self._api.upload_save(
+                        rom.rom_id,
+                        upload_path,
+                        emulator=local.emulator,
+                        save_id=None,
+                        device_id=self._device_id,
+                        slot=local.slot,
+                    )
         except RommConflictError:
             # Server-as-arbiter: another device uploaded since this device's
             # last sync. Preserve the prior verbatim — next sync re-classifies

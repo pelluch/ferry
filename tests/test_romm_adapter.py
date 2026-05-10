@@ -84,6 +84,47 @@ def test_unmapped_4xx_falls_back_to_base_error() -> None:
     assert type(ei.value) is RommApiError
 
 
+@respx.mock
+def test_4xx_with_json_detail_populates_payload_detail() -> None:
+    """RomM's standard 4xx body shape is `{"detail": "..."}`. The
+    parsed string is attached to the exception so callers can
+    distinguish a real RomM error from a transport-layer 404
+    (proxy can't reach RomM, wrong base URL, etc.) without parsing
+    the message string."""
+    respx.get(f"{BASE_URL}/api/x").mock(
+        return_value=httpx.Response(404, json={"detail": "Save with ID 99 not found"})
+    )
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommApiError) as ei:
+        http.get_json("/api/x")
+    assert ei.value.payload_detail == "Save with ID 99 not found"
+
+
+@respx.mock
+def test_4xx_without_json_body_leaves_payload_detail_none() -> None:
+    """A 4xx whose body isn't JSON (e.g., proxy 404 with HTML) leaves
+    `payload_detail` as None — gating recovery logic on this attribute
+    avoids silently treating non-RomM errors as RomM errors."""
+    respx.get(f"{BASE_URL}/api/x").mock(
+        return_value=httpx.Response(404, content=b"<html>nginx 404</html>")
+    )
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommApiError) as ei:
+        http.get_json("/api/x")
+    assert ei.value.payload_detail is None
+
+
+@respx.mock
+def test_4xx_with_json_body_but_no_detail_field_leaves_payload_detail_none() -> None:
+    """A JSON 4xx body without a `detail` field doesn't fit RomM's shape;
+    treat it the same as no JSON at all so callers don't conflate
+    third-party errors with RomM errors."""
+    respx.get(f"{BASE_URL}/api/x").mock(
+        return_value=httpx.Response(404, json={"error": "something else"})
+    )
+    with RommHttpAdapter(make_config()) as http, pytest.raises(RommApiError) as ei:
+        http.get_json("/api/x")
+    assert ei.value.payload_detail is None
+
+
 # ---------------------------------------------------------------------------
 # RommHttpAdapter — retry
 # ---------------------------------------------------------------------------

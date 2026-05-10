@@ -13,6 +13,12 @@ class RommApiError(Exception):
     def __init__(self, message: str, url: str | None = None, method: str | None = None) -> None:
         self.url = url
         self.method = method
+        # Populated by `RommHttpAdapter._translate_status` when the 4xx
+        # response body parsed as JSON `{"detail": "..."}` — RomM's
+        # standard error shape. Lets callers distinguish a true RomM-side
+        # error from a transport-layer impostor (proxy 404, gateway 502
+        # with HTML body, etc.) without parsing the message string.
+        self.payload_detail: str | None = None
         super().__init__(message)
 
 

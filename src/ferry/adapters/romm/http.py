@@ -284,31 +284,40 @@ class RommHttpAdapter:
         # RomM 4xx bodies are typically JSON `{"detail": "..."}`; surface the
         # detail when present so the user sees the server's reason (e.g.
         # "Slot has a newer save since your last sync") instead of just the code.
-        detail = ""
+        # The parsed detail is also attached to the exception as
+        # `payload_detail` — callers use its presence (not its content) to
+        # distinguish a real RomM error from a transport-layer impostor like
+        # a proxy 404 with no JSON body.
+        detail_text: str | None = None
         try:
             body = response.json()
             if isinstance(body, dict):
                 detail_val = body.get("detail")
                 if isinstance(detail_val, str):
-                    detail = f": {detail_val}"
+                    detail_text = detail_val
                 elif isinstance(detail_val, dict):
-                    detail = f": {detail_val.get('message') or detail_val}"
+                    msg_val = detail_val.get("message")
+                    detail_text = msg_val if isinstance(msg_val, str) else str(detail_val)
         except (ValueError, httpx.HTTPError):
             pass
-        msg = f"HTTP {code}: {response.reason_phrase}{detail} ({method} {url})"
+        suffix = f": {detail_text}" if detail_text else ""
+        msg = f"HTTP {code}: {response.reason_phrase}{suffix} ({method} {url})"
         cls = self._HTTP_STATUS_MAP.get(code)
         if cls is RommServerError:
-            return RommServerError(
+            exc: RommApiError = RommServerError(
                 f"Rate limited — too many requests ({method} {url})",
                 status_code=code,
                 url=url,
                 method=method,
             )
-        if cls is not None:
-            return cls(msg, url=url, method=method)
-        if code >= 500:
-            return RommServerError(msg, status_code=code, url=url, method=method)
-        return RommApiError(msg, url=url, method=method)
+        elif cls is not None:
+            exc = cls(msg, url=url, method=method)
+        elif code >= 500:
+            exc = RommServerError(msg, status_code=code, url=url, method=method)
+        else:
+            exc = RommApiError(msg, url=url, method=method)
+        exc.payload_detail = detail_text
+        return exc
 
     @staticmethod
     def _translate_transport_error(exc: httpx.HTTPError, url: str, method: str) -> RommApiError:
