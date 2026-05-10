@@ -1,4 +1,13 @@
-"""Pack/unpack a Wii NAND save folder as a single zip + content-hash mirror.
+"""Pack/unpack Dolphin saves as a single wrapper-prefixed zip + content-hash mirror.
+
+Originally Wii-only (v3.6); v3.7 ck2 added the file-list helpers
+(`archive_files`, `files_content_hash`) for the GameCube
+per-rom-bundle archetype, where the source isn't a folder but an
+ad-hoc set of `.gci` files matched across region subfolders / Card A
++ Card B. Both helpers share the same wrapper-prefix layout and
+manifest-hash algorithm — the only difference is how they enumerate
+their inputs. Module name kept as `wii_archive.py` for ck2; rename to
+`dolphin_archive.py` is deferred to ck4 cleanup.
 
 Wii saves at `<saves_root>/title/<TID_HIGH>/<TID_LOW>/` are folders
 of small binaries (`data/save.bin`, `data/banner.bin`, plus `content/`
@@ -162,6 +171,59 @@ def folder_content_hash(src_folder: Path, *, wrapper: str | None = None) -> str:
     file_hashes = [
         f"{wrapper}/{relpath.as_posix()}:{md5_file(src_folder / relpath)}" for relpath in entries
     ]
+    combined = "\n".join(file_hashes)
+    return hashlib.md5(combined.encode(), usedforsecurity=False).hexdigest()
+
+
+def archive_files(files: list[Path], dest_zip: Path, *, wrapper: str) -> None:
+    """Build a wrapper-prefixed zip from an explicit list of source files.
+
+    Sibling of `archive_save_folder` for the GameCube per-rom-bundle
+    archetype: the source isn't a single folder, it's an ad-hoc set of
+    `.gci` files matched across region subfolders / Card A + Card B.
+    Each file lands at zip path `<wrapper>/<file.name>` (flat under
+    the wrapper) — Argosy's GC bundle layout. Uses each file's basename
+    only; duplicates in the input list trigger an early ValueError to
+    catch caller-side bugs (the producing walker is responsible for
+    de-duping; see Card A + Card B clash handling in `gamecube_saves`).
+
+    Files are added in name-sorted order for stable test output.
+    Otherwise the zip-byte non-determinism caveat from
+    `archive_save_folder` applies — use `files_content_hash` for stable
+    identity, never `md5_file(zip)`.
+    """
+    sorted_files = sorted(files, key=lambda p: p.name)
+    seen: set[str] = set()
+    for f in sorted_files:
+        if f.name in seen:
+            raise ValueError(f"archive_files: duplicate basename {f.name!r} — caller must dedupe")
+        seen.add(f.name)
+    dest_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_STORED) as zf:
+        for f in sorted_files:
+            zf.write(f, arcname=f"{wrapper}/{f.name}")
+
+
+def files_content_hash(files: list[Path], *, wrapper: str) -> str:
+    """Compute RomM-style content_hash directly from a list of files.
+
+    Equivalent to `compute_content_hash(archive_files(files, ...))` by
+    construction: same name-sorted traversal, same per-file md5, same
+    `<wrapper>/<name>:<hash>` join, same outer md5. Used by the GC
+    walker so each `LocalSave.local_md5` matches what RomM (and Argosy)
+    would compute on the corresponding bundle without paying the cost
+    of zipping every walker iteration. Same dedup contract as
+    `archive_files` — duplicate basenames raise.
+    """
+    sorted_files = sorted(files, key=lambda p: p.name)
+    seen: set[str] = set()
+    for f in sorted_files:
+        if f.name in seen:
+            raise ValueError(
+                f"files_content_hash: duplicate basename {f.name!r} — caller must dedupe"
+            )
+        seen.add(f.name)
+    file_hashes = [f"{wrapper}/{f.name}:{md5_file(f)}" for f in sorted_files]
     combined = "\n".join(file_hashes)
     return hashlib.md5(combined.encode(), usedforsecurity=False).hexdigest()
 
