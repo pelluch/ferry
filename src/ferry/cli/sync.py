@@ -4,6 +4,14 @@ from typing import Any
 
 import click
 
+from ferry.adapters.cemu.cemu_paths import CemuInstall, discover_cemu_installs
+from ferry.adapters.cemu.cemu_tool import (
+    WiiUTitleCache,
+    discover_cemu_tool,
+)
+from ferry.adapters.cemu.cemu_tool import (
+    default_cache_path as default_wiiu_cache_path,
+)
 from ferry.adapters.dolphin.dolphin_paths import (
     DolphinInstall,
     discover_dolphin_installs,
@@ -48,6 +56,7 @@ from ferry.domain.sync_plan import (
     UpdateAction,
     compute_plan,
 )
+from ferry.services.cemu_save_backend import CemuSaveBackend
 from ferry.services.gamecube_save_backend import GameCubeSaveBackend
 from ferry.services.launch_hooks import (
     default_snapshot_path,
@@ -422,6 +431,7 @@ def _print_save_sync_preview(
 
     _preview_retroarch(config, api, state, device_id=device_id, full=full)
     _preview_dolphin(config, api, state, device_id=device_id, full=full)
+    _preview_cemu(config, api, state, device_id=device_id, full=full)
 
 
 def _preview_retroarch(
@@ -610,6 +620,54 @@ def _resolve_dolphin_install_for_preview(
     return resolution.install
 
 
+def _preview_cemu(
+    config: Config,
+    api: RommApi,
+    state: LibraryState,
+    *,
+    device_id: str | None,
+    full: bool,
+) -> None:
+    """Dry-run preview for the Cemu (Wii U) backend."""
+    assert config.saves is not None
+    if config.destination is None:
+        return  # caller-side guard; defensive
+    label = CemuSaveBackend.backend_label
+    installs = discover_cemu_installs()
+    if not installs:
+        click.echo(f"Save sync ({label}): would skip (no install detected)")
+        return
+    resolution = resolve_install(
+        installs,
+        configured_source=None,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    )
+    if resolution.install is None:
+        if resolution.reason == ResolutionReason.AMBIGUOUS:
+            click.echo(f"Save sync ({label}): would skip (multiple active installs)")
+        return
+    tool = discover_cemu_tool()
+    if tool is None:
+        click.echo(f"Save sync ({label}): would skip (cemu not found)")
+        return
+    backend = CemuSaveBackend(
+        install=resolution.install,
+        api=api,
+        device_id=device_id or "",
+        tool=tool,
+        roms_base=config.destination.roms_base,
+        cache=WiiUTitleCache(default_wiiu_cache_path()),
+        log=logger,
+    )
+    click.echo(
+        f"Save sync ({label}): targeting {resolution.install.source} "
+        f"@ {resolution.install.wiiu_saves_root}"
+    )
+    plan = backend.plan(state)
+    _print_save_plan(plan, full=full)
+
+
 def _print_save_plan(plan: SavePlan, *, full: bool) -> None:
     """Render a `SavePlan` in the existing dry-run output style."""
     if plan.failed:
@@ -695,7 +753,8 @@ def _prepare_save_backends(
     # device id we won't use).
     ra_install = _select_retroarch_install(config.saves)
     dolphin_install = _select_dolphin_install(config.saves)
-    if ra_install is None and dolphin_install is None:
+    cemu_install = _select_cemu_install()
+    if ra_install is None and dolphin_install is None and cemu_install is None:
         return [], state
 
     try:
@@ -726,7 +785,62 @@ def _prepare_save_backends(
     if dolphin_install is not None:
         backends.extend(_build_dolphin_family_backends(dolphin_install, config, api, device_id))
 
+    if cemu_install is not None:
+        cemu_backend = _build_cemu_backend(cemu_install, config, api, device_id)
+        if cemu_backend is not None:
+            backends.append(cemu_backend)
+
     return backends, state
+
+
+def _select_cemu_install() -> CemuInstall | None:
+    """Auto-select the Cemu install ferry should sync, or None.
+
+    No `[saves].cemu_install` override yet — v5 targets a single
+    RetroDECK Cemu profile, so there's nothing to disambiguate. An
+    override can be added later if multi-install setups become real.
+    NO_INSTALLS is silent (a non-event — RA/Dolphin may still carry
+    the user's saves); AMBIGUOUS surfaces a one-liner.
+    """
+    resolution = resolve_install(
+        discover_cemu_installs(),
+        configured_source=None,
+        source_of=lambda i: i.source,
+        has_active=lambda i: i.has_saves,
+    )
+    if resolution.install is None and resolution.reason == ResolutionReason.AMBIGUOUS:
+        click.echo("")
+        click.echo("save sync (Cemu) skipped: multiple installs with active saves.")
+    return resolution.install
+
+
+def _build_cemu_backend(
+    install: CemuInstall,
+    config: Config,
+    api: RommApi,
+    device_id: str,
+) -> CemuSaveBackend | None:
+    """Construct a CemuSaveBackend, or skip with a message if `cemu`
+    isn't discoverable (ferry needs it to read Wii U title IDs)."""
+    if config.destination is None:
+        return None  # caller guard checked this; defensive
+    tool = discover_cemu_tool()
+    if tool is None:
+        click.echo("")
+        click.echo(
+            f"save sync ({CemuSaveBackend.backend_label}) skipped: cemu not found.\n"
+            "  Install Cemu (RetroDECK) — ferry needs it to read Wii U title IDs."
+        )
+        return None
+    return CemuSaveBackend(
+        install=install,
+        api=api,
+        device_id=device_id,
+        tool=tool,
+        roms_base=config.destination.roms_base,
+        cache=WiiUTitleCache(default_wiiu_cache_path()),
+        log=logger,
+    )
 
 
 def _build_dolphin_family_backends(
