@@ -20,10 +20,17 @@ instead requires the stdout to parse as `meta.xml` with a 16-hex
 `<title_id>`. A crash (or our cwd-guard's exit 91) is still treated as
 a hard failure.
 
-**cwd matters.** Cemu resolves `keys.txt` relative to the working
-directory. The RetroDECK invocations `cd` into the Cemu data dir
-(passed as the shell snippet's `$1`, never string-interpolated, so no
-injection); the system-path invocation passes `cwd=` to subprocess.
+**cwd matters.** Cemu auto-detects its data directory by walking the
+filesystem from its working directory; if the cwd has no `keys.txt`
+file, that walk recurses unboundedly and stack-overflows (SIGSEGV,
+exit 139) — that, not a clean error, is what "keys.txt missing" looks
+like. So the cwd must be a directory holding a *resolvable* `keys.txt`
+(a dangling symlink doesn't count — RetroDECK pre-creates one pointing
+at its BIOS dir). The RetroDECK invocations `cd` into the Cemu data
+dir (passed as the shell snippet's `$1`, never string-interpolated, so
+no injection); the system-path invocation passes `cwd=` to subprocess.
+`extract_title_id` pre-flights the `keys.txt` check so a missing one
+is a clean failure rather than a crash.
 
 Three invocation strategies, probed in order — mirrors
 `dolphin_tool.discover_dolphin_tool`:
@@ -158,6 +165,22 @@ class CemuTool:
         so failures aren't silent — the caller sees None and falls back
         (manual override) or skips the ROM.
         """
+        # Pre-flight: Cemu stack-overflows (SIGSEGV) if its working
+        # directory has no `keys.txt` file. `.is_file()` follows
+        # symlinks, so RetroDECK's dangling pre-created symlink (target
+        # not yet populated under <retrodeck>/bios/cemu/) correctly
+        # reads as absent. Catch it here for an actionable message
+        # instead of letting Cemu crash.
+        keys_txt = keys_dir / "keys.txt"
+        if not keys_txt.is_file():
+            logger.warning(
+                "cemu --extract: no usable keys.txt at %s — Cemu cannot decrypt "
+                "Wii U ROMs without it. On RetroDECK, place your Cemu keys at "
+                "<retrodeck>/bios/cemu/keys.txt (RetroDECK symlinks it into the "
+                "Cemu data dir).",
+                keys_txt,
+            )
+            return None
         try:
             result = self.invoke("-e", str(rom_path), "-p", "meta/meta.xml", keys_dir=keys_dir)
         except subprocess.TimeoutExpired:

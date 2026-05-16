@@ -184,16 +184,51 @@ def test_invoke_system_source_passes_keys_dir_as_cwd(
 # ---------------------------------------------------------------------------
 
 
+def _keys_dir(tmp_path: Path) -> Path:
+    """A directory holding a keys.txt — `extract_title_id` pre-flights for one."""
+    (tmp_path / "keys.txt").write_text("# fake cemu keys\n")
+    return tmp_path
+
+
 def test_extract_title_id_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeRun(returncode=0, stdout=_META_XML)
     monkeypatch.setattr(subprocess, "run", fake)
 
-    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=tmp_path)
+    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=_keys_dir(tmp_path))
     assert title is not None
     assert title.title_id == "00050000101C9400"
     # The invocation is `cemu -e <rom> -p meta/meta.xml`.
     argv, _ = fake.calls[0]
     assert argv[-4:] == ["-e", str(tmp_path / "rom.wux"), "-p", "meta/meta.xml"]
+
+
+def test_extract_title_id_missing_keys_txt_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No keys.txt in the keys dir → fail before invoking Cemu at all,
+    so the user gets an actionable message instead of a 139 segfault."""
+    fake = _FakeRun(returncode=0, stdout=_META_XML)
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    # tmp_path has no keys.txt planted.
+    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=tmp_path)
+    assert title is None
+    assert fake.calls == []  # Cemu never invoked — segfault avoided
+
+
+def test_extract_title_id_dangling_keys_symlink_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RetroDECK pre-creates keys.txt as a symlink into its BIOS dir; if
+    the target isn't populated the symlink dangles. `.is_file()` follows
+    symlinks, so a dangling one reads as absent — fail fast, don't crash."""
+    fake = _FakeRun(returncode=0, stdout=_META_XML)
+    monkeypatch.setattr(subprocess, "run", fake)
+    (tmp_path / "keys.txt").symlink_to(tmp_path / "nonexistent-bios" / "keys.txt")
+
+    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=tmp_path)
+    assert title is None
+    assert fake.calls == []
 
 
 def test_extract_title_id_exit0_but_unable_to_open_is_failure(
@@ -204,18 +239,19 @@ def test_extract_title_id_exit0_but_unable_to_open_is_failure(
     fake = _FakeRun(returncode=0, stdout=_UNABLE_TO_OPEN)
     monkeypatch.setattr(subprocess, "run", fake)
 
-    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=tmp_path)
+    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=_keys_dir(tmp_path))
     assert title is None
 
 
 def test_extract_title_id_segfault_is_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """keys.txt missing from cwd → Cemu segfaults (exit 139)."""
+    """A SIGSEGV (exit 139) — e.g. Cemu's data-dir walk overflowing — is
+    a hard failure even though the pre-flight keys.txt check passed."""
     fake = _FakeRun(returncode=139, stdout="", stderr="")
     monkeypatch.setattr(subprocess, "run", fake)
 
-    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=tmp_path)
+    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=_keys_dir(tmp_path))
     assert title is None
 
 
@@ -226,7 +262,7 @@ def test_extract_title_id_cwd_guard_exit_is_failure(
     fake = _FakeRun(returncode=91)
     monkeypatch.setattr(subprocess, "run", fake)
 
-    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=tmp_path)
+    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=_keys_dir(tmp_path))
     assert title is None
 
 
@@ -236,7 +272,7 @@ def test_extract_title_id_timeout_is_failure(
     fake = _FakeRun(raises=subprocess.TimeoutExpired(cmd="cemu", timeout=120.0))
     monkeypatch.setattr(subprocess, "run", fake)
 
-    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=tmp_path)
+    title = _retrodeck_tool().extract_title_id(tmp_path / "rom.wux", keys_dir=_keys_dir(tmp_path))
     assert title is None
 
 
@@ -394,10 +430,11 @@ def test_lookup_populates_cache_on_fresh_read(
     fake = _FakeRun(returncode=0, stdout=_META_XML)
     monkeypatch.setattr(subprocess, "run", fake)
 
-    title = lookup_wiiu_title(rom, _retrodeck_tool(), cache, keys_dir=tmp_path)
+    keys_dir = _keys_dir(tmp_path)
+    title = lookup_wiiu_title(rom, _retrodeck_tool(), cache, keys_dir=keys_dir)
     assert title == WiiUTitle(title_id="00050000101C9400")
     # Second lookup is a cache hit — invoke count stays at 1.
-    lookup_wiiu_title(rom, _retrodeck_tool(), cache, keys_dir=tmp_path)
+    lookup_wiiu_title(rom, _retrodeck_tool(), cache, keys_dir=keys_dir)
     assert len(fake.calls) == 1
 
 
@@ -408,6 +445,7 @@ def test_lookup_without_cache_invokes_every_time(
     fake = _FakeRun(returncode=0, stdout=_META_XML)
     monkeypatch.setattr(subprocess, "run", fake)
 
-    lookup_wiiu_title(rom, _retrodeck_tool(), None, keys_dir=tmp_path)
-    lookup_wiiu_title(rom, _retrodeck_tool(), None, keys_dir=tmp_path)
+    keys_dir = _keys_dir(tmp_path)
+    lookup_wiiu_title(rom, _retrodeck_tool(), None, keys_dir=keys_dir)
+    lookup_wiiu_title(rom, _retrodeck_tool(), None, keys_dir=keys_dir)
     assert len(fake.calls) == 2
