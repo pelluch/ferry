@@ -1,4 +1,4 @@
-"""Tests for `ferry.adapters.dolphin.wii_archive`.
+"""Tests for `ferry.adapters.dolphin.dolphin_archive`.
 
 The load-bearing property is `compute_content_hash`: same content
 packed two different ways must produce the same hash, because that's
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from ferry.adapters.dolphin.wii_archive import (
+from ferry.adapters.dolphin.dolphin_archive import (
     archive_save_folder,
     compute_content_hash,
     extract_save_zip,

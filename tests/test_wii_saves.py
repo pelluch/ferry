@@ -17,9 +17,9 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from ferry.adapters.dolphin.dolphin_archive import archive_save_folder, compute_content_hash
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall
 from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
-from ferry.adapters.dolphin.wii_archive import archive_save_folder, compute_content_hash
 from ferry.adapters.dolphin.wii_saves import list_local_saves, wii_save_folder
 from ferry.domain.state import RomState, TransformedOutput
 

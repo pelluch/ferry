@@ -1,13 +1,13 @@
 """Pack/unpack Dolphin saves as a single wrapper-prefixed zip + content-hash mirror.
 
-Originally Wii-only (v3.6); v3.7 ck2 added the file-list helpers
-(`archive_files`, `files_content_hash`) for the GameCube
-per-rom-bundle archetype, where the source isn't a folder but an
-ad-hoc set of `.gci` files matched across region subfolders / Card A
-+ Card B. Both helpers share the same wrapper-prefix layout and
-manifest-hash algorithm — the only difference is how they enumerate
-their inputs. Module name kept as `wii_archive.py` for ck2; rename to
-`dolphin_archive.py` is deferred to ck4 cleanup.
+Two archetypes share this module. The folder helpers
+(`archive_save_folder`, `folder_content_hash`) serve the Wii NAND
+backend, where a save is a directory tree. The file-list helpers
+(`archive_files`, `files_content_hash`, added v3.7 ck2) serve the
+GameCube per-rom-bundle backend, where a save is an ad-hoc set of
+`.gci` files matched across region subfolders / Card A + Card B.
+Both share the same wrapper-prefix layout and manifest-hash
+algorithm — the only difference is how they enumerate their inputs.
 
 Wii saves at `<saves_root>/title/<TID_HIGH>/<TID_LOW>/` are folders
 of small binaries (`data/save.bin`, `data/banner.bin`, plus `content/`

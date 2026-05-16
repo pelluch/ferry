@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ferry.adapters.dolphin.dolphin_archive import files_content_hash
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall, RegionEncoding
 from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DiscHeaderCache, DolphinTool
 from ferry.adapters.dolphin.gamecube_saves import (
@@ -20,7 +21,6 @@ from ferry.adapters.dolphin.gamecube_saves import (
     match_rom_gcis,
     region_card_dir,
 )
-from ferry.adapters.dolphin.wii_archive import files_content_hash
 from ferry.domain.state import RomState, TransformedOutput
 
 # ---------------------------------------------------------------------------

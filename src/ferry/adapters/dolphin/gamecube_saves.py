@@ -34,6 +34,7 @@ import logging
 from collections.abc import Iterable
 from pathlib import Path
 
+from ferry.adapters.dolphin.dolphin_archive import files_content_hash
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall, RegionEncoding
 from ferry.adapters.dolphin.dolphin_tool import (
     DiscHeader,
@@ -41,7 +42,6 @@ from ferry.adapters.dolphin.dolphin_tool import (
     DolphinTool,
     lookup_disc_header,
 )
-from ferry.adapters.dolphin.wii_archive import files_content_hash
 from ferry.domain.platforms import resolve_platform_dir
 from ferry.domain.save_local import LocalSave
 from ferry.domain.state import RomState

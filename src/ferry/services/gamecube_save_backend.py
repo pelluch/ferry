@@ -33,6 +33,11 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from ferry.adapters.dolphin.dolphin_archive import (
+    archive_files,
+    extract_save_zip,
+    files_content_hash,
+)
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall
 from ferry.adapters.dolphin.dolphin_tool import (
     DiscHeader,
@@ -44,11 +49,6 @@ from ferry.adapters.dolphin.gamecube_saves import (
     list_local_saves,
     match_rom_gcis,
     region_card_dir,
-)
-from ferry.adapters.dolphin.wii_archive import (
-    archive_files,
-    extract_save_zip,
-    files_content_hash,
 )
 from ferry.adapters.romm import RommApi
 from ferry.adapters.romm.http import DownloadResult

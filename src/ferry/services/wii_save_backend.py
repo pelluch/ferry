@@ -14,7 +14,7 @@ LocalSave per Wii title with a save folder present, with
 `local_path` pointing at the title parent folder and `local_md5` set
 to `folder_content_hash` (matches RomM's manifest hash for the
 corresponding zip — and Argosy's `calculateFolderAsZipHash` for the
-same folder; see `wii_archive` for the three-way equivalence). The
+same folder; see `dolphin_archive` for the three-way equivalence). The
 backend's transform hooks turn that folder→zip on upload and
 zip→folder on download; the base class never sees the zip's bytes
 directly.
@@ -38,17 +38,17 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from ferry.adapters.dolphin.dolphin_archive import (
+    archive_save_folder,
+    extract_save_zip,
+    folder_content_hash,
+)
 from ferry.adapters.dolphin.dolphin_paths import DolphinInstall
 from ferry.adapters.dolphin.dolphin_tool import (
     DiscHeader,
     DiscHeaderCache,
     DolphinTool,
     lookup_disc_header,
-)
-from ferry.adapters.dolphin.wii_archive import (
-    archive_save_folder,
-    extract_save_zip,
-    folder_content_hash,
 )
 from ferry.adapters.dolphin.wii_saves import list_local_saves, wii_save_folder
 from ferry.adapters.romm import RommApi
@@ -228,7 +228,7 @@ class WiiSaveBackend(SaveBackendBase):
         """Use `server.content_hash` (manifest hash for the zip) when
         available; otherwise recompute `folder_content_hash` from the
         just-extracted folder. Both equal each other by construction
-        (see `wii_archive` equivalence proof); the fallback exists
+        (see `dolphin_archive` equivalence proof); the fallback exists
         defensively for the RomM 4.8.1 PUT-without-content_hash bug.
 
         Never returns `download.md5` — the byte-md5 of the zip blob

@@ -23,12 +23,12 @@ from unittest.mock import MagicMock
 import httpx
 import respx
 
-from ferry.adapters.dolphin.dolphin_paths import DolphinInstall, RegionEncoding
-from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DolphinTool
-from ferry.adapters.dolphin.wii_archive import (
+from ferry.adapters.dolphin.dolphin_archive import (
     compute_content_hash,
     files_content_hash,
 )
+from ferry.adapters.dolphin.dolphin_paths import DolphinInstall, RegionEncoding
+from ferry.adapters.dolphin.dolphin_tool import DiscHeader, DolphinTool
 from ferry.adapters.romm import RommApi, RommHttpAdapter
 from ferry.config import RommConfig
 from ferry.domain.state import LibraryState, RomState, SaveRecord, TransformedOutput
