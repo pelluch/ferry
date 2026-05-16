@@ -68,16 +68,31 @@ def archive_save_folder(src_folder: Path, dest_zip: Path) -> None:
     `extract_save_zip` both strip whatever the first entry's top-level
     dir is — but its presence is required.
 
+    **Directory entries are emitted for every subdirectory**, mirroring
+    Argosy's `SaveArchiver.zipFolderRecursive`. This is what preserves
+    *empty* directories across a round-trip — a folder with no files
+    (e.g. Cemu's `user/common/` for a game with no common save data,
+    or a vanilla Wii disc's empty `content/`) would otherwise vanish,
+    since a files-only archive has nothing to recreate it from. Dir
+    entries don't affect `compute_content_hash` (it skips `name/`
+    entries, as do RomM's and Argosy's hashers), so this is
+    content-hash-neutral — no re-upload churn for saves archived by an
+    older ferry.
+
     Entries are added in relpath-sorted order for stable test output.
     OS-cruft files (`.DS_Store`, `Thumbs.db`, `desktop.ini`) and
-    `__MACOSX/` subtrees are skipped. Otherwise Python's `zipfile`
-    defaults apply: mtimes from disk, external_attr from file mode,
-    ZIP_STORED.
+    `__MACOSX/` subtrees are skipped (files and dirs alike). Otherwise
+    Python's `zipfile` defaults apply: mtimes from disk, ZIP_STORED.
 
     The resulting bytes are NOT guaranteed identical across machines or
     Python versions. Use `compute_content_hash` for stable identity.
     """
-    entries = sorted(
+    dir_entries = sorted(
+        path.relative_to(src_folder)
+        for path in src_folder.rglob("*")
+        if path.is_dir() and not is_save_path_ignored(path.relative_to(src_folder))
+    )
+    file_entries = sorted(
         path.relative_to(src_folder)
         for path in src_folder.rglob("*")
         if path.is_file() and not is_save_path_ignored(path.relative_to(src_folder))
@@ -85,9 +100,10 @@ def archive_save_folder(src_folder: Path, dest_zip: Path) -> None:
     wrapper = src_folder.name
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_STORED) as zf:
-        for relpath in entries:
-            arcname = f"{wrapper}/{relpath.as_posix()}"
-            zf.write(src_folder / relpath, arcname=arcname)
+        for relpath in dir_entries:
+            zf.mkdir(f"{wrapper}/{relpath.as_posix()}")
+        for relpath in file_entries:
+            zf.write(src_folder / relpath, arcname=f"{wrapper}/{relpath.as_posix()}")
 
 
 def extract_save_zip(src_zip: Path, dest_folder: Path) -> None:
@@ -100,20 +116,21 @@ def extract_save_zip(src_zip: Path, dest_folder: Path) -> None:
     as-is (matches Argosy's tolerance for mixed layouts).
 
     Idempotent: existing files at the same paths are overwritten.
-    Ignored files (see `_IGNORED_NAMES` / `_IGNORED_DIR_NAMES`) are
-    silently skipped on extract too — symmetric with archive — so a
-    zip carrying `.DS_Store` from a misbehaving uploader can't pollute
-    Dolphin's NAND tree. Refuses path-traversal entries up-front
-    (`is_unsafe_zip_member` runs on the original entry name, before
-    strip — catches `wrapper/../../escape` because `..` is in parts).
+    Directory entries (`name/`) are recreated as empty directories —
+    this is what preserves empty dirs (`user/common/`, Wii `content/`)
+    across a round-trip. Ignored files (see `_IGNORED_NAMES` /
+    `_IGNORED_DIR_NAMES`) are silently skipped on extract too —
+    symmetric with archive — so a zip carrying `.DS_Store` from a
+    misbehaving uploader can't pollute Dolphin's NAND tree. Refuses
+    path-traversal entries up-front (`is_unsafe_zip_member` runs on the
+    original entry name, before strip — catches `wrapper/../../escape`
+    because `..` is in parts).
     """
     dest_folder.mkdir(parents=True, exist_ok=True)
     output_root = dest_folder.resolve()
     with zipfile.ZipFile(src_zip, "r") as zf:
         wrapper: str | None = None
         for info in zf.infolist():
-            if info.is_dir():
-                continue
             if is_unsafe_zip_member(info.filename):
                 raise ValueError(
                     f"refusing to extract unsafe path from {src_zip.name}: {info.filename!r}"
@@ -129,14 +146,18 @@ def extract_save_zip(src_zip: Path, dest_folder: Path) -> None:
             relname = info.filename
             if wrapper is not None and relname.startswith(f"{wrapper}/"):
                 relname = relname[len(wrapper) + 1 :]
+            relname = relname.rstrip("/")  # dir entries carry a trailing slash
             if not relname:
-                continue
+                continue  # the bare wrapper entry, if any — nothing to create
             target = (dest_folder / relname).resolve()
             if not is_within_dir(target, output_root):
                 raise ValueError(
                     f"refusing to extract {info.filename!r} from {src_zip.name}: "
                     f"escapes destination directory"
                 )
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info) as src_f, target.open("wb") as dst_f:
                 shutil.copyfileobj(src_f, dst_f)

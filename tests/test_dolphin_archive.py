@@ -89,8 +89,10 @@ def test_archive_skips_dotfiles(tmp_path: Path) -> None:
     with zipfile.ZipFile(archive) as zf:
         names = set(zf.namelist())
     # Every entry is prefixed with the source folder name (wrapper dir
-    # required for Argosy compat).
-    assert names == {"src/save.bin"}
+    # required for Argosy compat). `subdir/` is a real directory so it
+    # gets a dir entry (its only content, `__MACOSX/`, is cruft-skipped
+    # — leaving it empty in the zip, but still a directory that existed).
+    assert names == {"src/save.bin", "src/subdir/"}
 
 
 def test_archive_wraps_every_entry_with_source_folder_name(tmp_path: Path) -> None:
@@ -113,12 +115,37 @@ def test_archive_wraps_every_entry_with_source_folder_name(tmp_path: Path) -> No
 
     with zipfile.ZipFile(archive) as zf:
         names = sorted(zf.namelist())
+    # Directory entries (`<dir>/`) are emitted for every subdirectory —
+    # mirrors Argosy's zipFolderRecursive and is what preserves empty
+    # dirs across a round-trip.
     assert names == [
+        "RSPE/content/",
         "RSPE/content/title.tmd",
+        "RSPE/data/",
         "RSPE/data/banner.bin",
         "RSPE/data/save.bin",
         "RSPE/top.txt",
     ]
+
+
+def test_archive_extract_round_trip_preserves_empty_directories(tmp_path: Path) -> None:
+    """A directory with no files (e.g. Cemu's `user/common/` for a game
+    with no common save data, or a vanilla Wii disc's empty `content/`)
+    must survive the archive→extract round-trip — a files-only zip
+    would silently drop it."""
+    src = tmp_path / "RSPE"
+    _populate(src, {"data/save.bin": b"state"})
+    (src / "content").mkdir()  # empty directory — no files under it
+    (src / "data" / "empty_sub").mkdir()  # empty dir nested under a non-empty one
+
+    archive = tmp_path / "out.zip"
+    archive_save_folder(src, archive)
+    dest = tmp_path / "extracted"
+    extract_save_zip(archive, dest)
+
+    assert (dest / "content").is_dir()
+    assert (dest / "data" / "empty_sub").is_dir()
+    assert (dest / "data" / "save.bin").read_bytes() == b"state"
 
 
 def test_extract_skips_dotfiles_in_received_archive(tmp_path: Path) -> None:
