@@ -329,6 +329,64 @@ def test_list_roms_handles_empty_collection() -> None:
 
 
 # ---------------------------------------------------------------------------
+# RommApi.list_firmware / download_firmware — BIOS syncing (v5.5)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_list_firmware_filters_by_platform_id() -> None:
+    route = respx.get(f"{BASE_URL}/api/firmware").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 1, "file_name": "ps2-0230a-20080220.bin", "is_verified": True},
+                {"id": 2, "file_name": "ps2-0220e-20040614.bin", "is_verified": False},
+            ],
+        )
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        firmware = api.list_firmware(platform_id=12)
+    assert "platform_id=12" in str(route.calls.last.request.url)
+    assert [f["id"] for f in firmware] == [1, 2]
+
+
+@respx.mock
+def test_list_firmware_handles_platform_with_no_firmware() -> None:
+    respx.get(f"{BASE_URL}/api/firmware").mock(return_value=httpx.Response(200, json=[]))
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        assert api.list_firmware(platform_id=4) == []
+
+
+@respx.mock
+def test_download_firmware_streams_to_dest_and_returns_hash(tmp_path) -> None:
+    respx.get(f"{BASE_URL}/api/firmware/7/content/ps2-0230a-20080220.bin").mock(
+        return_value=httpx.Response(200, content=_PAYLOAD)
+    )
+    dest = tmp_path / "bios" / "ps2-0230a-20080220.bin"
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        result = api.download_firmware(7, "ps2-0230a-20080220.bin", dest)
+    assert result.path == dest
+    assert result.md5 == _PAYLOAD_MD5
+    assert dest.read_bytes() == _PAYLOAD
+
+
+@respx.mock
+def test_download_firmware_url_encodes_filename(tmp_path) -> None:
+    """Reserved characters in a firmware filename escape exactly once."""
+    route = respx.get(url__regex=rf"{BASE_URL}/api/firmware/9/content/.*").mock(
+        return_value=httpx.Response(200, content=_PAYLOAD)
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        api.download_firmware(9, "[BIOS] Complex (4627).bin", tmp_path / "out.bin")
+    sent = str(route.calls.last.request.url)
+    assert "%5BBIOS%5D%20Complex%20%284627%29.bin" in sent
+
+
+# ---------------------------------------------------------------------------
 # RommHttpAdapter.download — streaming, hashing, atomicity
 # ---------------------------------------------------------------------------
 

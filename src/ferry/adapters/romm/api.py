@@ -2,8 +2,9 @@
 #   py_modules/adapters/romm/romm_api.py
 # Lifted in ferry's checkpoint 3 (2026-04). Significant modifications:
 #   - Reduced to the ferry-needed surface (saves, devices, ROMs, collections,
-#     platforms, users); dropped firmware / notes / virtual-collection /
-#     heartbeat / metadata-summary endpoints not currently used.
+#     platforms, users); dropped notes / virtual-collection / heartbeat /
+#     metadata-summary endpoints not currently used. (Firmware was dropped
+#     in the original lift and re-added in v5.5 ck1 for BIOS syncing.)
 #   - Merged decky's `download_save` and `download_save_content` into a
 #     single `download_save(..., optimistic=...)`.
 #   - `delete_server_saves` → `delete_saves` (the adapter is already
@@ -116,6 +117,39 @@ class RommApi:
         """
         encoded = urllib.parse.quote(url_filename, safe="")
         path = f"/api/roms/{rom_id}/content/{encoded}"
+        return self._http.download(path, dest_path)
+
+    # ------------------------------------------------------------------
+    # Firmware / BIOS (DESIGN.md §5.2, v5.5)
+    # ------------------------------------------------------------------
+
+    def list_firmware(self, platform_id: int) -> list[dict[str, Any]]:
+        """GET /api/firmware?platform_id= — firmware records for one platform.
+
+        RomM models firmware (BIOS) per-platform, not per-ROM. Each record
+        carries `file_name`, the three hashes, and `is_verified` (RomM's
+        match against its curated known-BIOS database). Callers fetch one
+        platform at a time — ferry's BIOS sync scope follows `[sync]`, so
+        the platform set is already resolved before this is called.
+        """
+        result = self._http.get_json("/api/firmware", params={"platform_id": platform_id})
+        return result if isinstance(result, list) else []
+
+    def download_firmware(
+        self,
+        firmware_id: int,
+        url_filename: str,
+        dest_path: Path,
+    ) -> DownloadResult:
+        """Stream a firmware file's content to *dest_path*.
+
+        Mirrors `download_rom`: the file is identified by `firmware_id`,
+        `url_filename` (pass `firmware['file_name']`) only feeds RomM's
+        Content-Disposition and path disambiguation. URL-encoded with
+        `safe=""` so reserved characters escape exactly once before httpx.
+        """
+        encoded = urllib.parse.quote(url_filename, safe="")
+        path = f"/api/firmware/{firmware_id}/content/{encoded}"
         return self._http.download(path, dest_path)
 
     # ------------------------------------------------------------------
