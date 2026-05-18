@@ -3,7 +3,12 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ferry.services.trash import default_trash_root, purge_expired, trash_paths
+from ferry.services.trash import (
+    default_trash_root,
+    purge_expired,
+    trash_bios_files,
+    trash_paths,
+)
 
 
 def _now() -> datetime:
@@ -169,3 +174,44 @@ def test_purge_expired_zero_retention_purges_everything_dated(tmp_path: Path) ->
     ts = (_now() - timedelta(seconds=1)).strftime("%Y%m%dT%H%M%SZ")
     (trash_root / f"{ts}__rom1").mkdir()
     assert purge_expired(trash_root, retention_days=0, now=_now()) == 1
+
+
+# ---------------------------------------------------------------------------
+# trash_bios_files — BIOS analogue (v5.5)
+# ---------------------------------------------------------------------------
+
+
+def test_trash_bios_files_creates_bios_keyed_dir(tmp_path: Path) -> None:
+    bios_base = tmp_path / "bios"
+    fw = bios_base / "ps2-0230a.bin"
+    fw.parent.mkdir(parents=True)
+    fw.write_bytes(b"bios")
+
+    trash_root = tmp_path / "trash"
+    target = trash_bios_files([fw], 7, trash_root=trash_root, bios_base=bios_base, now=_now())
+
+    assert target == trash_root / "20260425T183000Z__bios7"
+    assert (target / "ps2-0230a.bin").read_bytes() == b"bios"
+    assert not fw.exists()
+
+
+def test_trash_bios_files_preserves_subfolder_layout(tmp_path: Path) -> None:
+    bios_base = tmp_path / "bios"
+    fw = bios_base / "dc" / "dc_boot.bin"
+    fw.parent.mkdir(parents=True)
+    fw.write_bytes(b"dc")
+
+    target = trash_bios_files(
+        [fw], 3, trash_root=tmp_path / "trash", bios_base=bios_base, now=_now()
+    )
+    assert (target / "dc" / "dc_boot.bin").read_bytes() == b"dc"
+
+
+def test_purge_expired_sweeps_bios_trash_dirs(tmp_path: Path) -> None:
+    """`__bios` dirs ride the same retention clock as `__rom` dirs."""
+    trash_root = tmp_path / "trash"
+    trash_root.mkdir()
+    old_ts = (_now() - timedelta(days=30)).strftime("%Y%m%dT%H%M%SZ")
+    (trash_root / f"{old_ts}__bios7").mkdir()
+    assert purge_expired(trash_root, retention_days=14, now=_now()) == 1
+    assert not (trash_root / f"{old_ts}__bios7").exists()

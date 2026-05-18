@@ -4,10 +4,12 @@ DESIGN.md §5.1 calls for delete-on-remove with retention: items disappear
 from `roms_base/` but are recoverable for `trash_retention_days` (default
 14) by walking the trash tree before they're purged.
 
-Layout: `<trash_root>/<UTC-timestamp>__rom<rom_id>[-<n>]/`. The `-n`
-suffix only kicks in when two trash events for the same rom collide
+Layout: `<trash_root>/<UTC-timestamp>__<key>[-<n>]/`, where `<key>` is
+`rom<rom_id>` for ROMs and `bios<firmware_id>` for BIOS files. The `-n`
+suffix only kicks in when two trash events for the same key collide
 within the same second. Files inside preserve their path relative to
-`roms_base` so a manual restore is `mv <trash>/<rel> <roms_base>/<rel>`.
+the anchor dir (`roms_base` / `bios_base`) so a manual restore is
+`mv <trash>/<rel> <anchor>/<rel>`.
 
 `purge_expired` is meant to run at the start of each `ferry sync` —
 trash older than the configured retention is removed.
@@ -55,8 +57,43 @@ def trash_paths(
     Returns the trash dir created (always; even if every path was missing
     on disk so the dir ends up empty — caller may inspect or rmdir).
     """
+    return _trash_into(paths, key=f"rom{rom_id}", trash_root=trash_root, anchor=roms_base, now=now)
+
+
+def trash_bios_files(
+    paths: list[Path | tuple[Path, Path]],
+    firmware_id: int,
+    *,
+    trash_root: Path,
+    bios_base: Path,
+    now: datetime | None = None,
+) -> Path:
+    """Move *paths* into a fresh timestamped trash dir for a deleted BIOS file.
+
+    The BIOS analogue of `trash_paths` (v5.5): identical timestamped
+    layout — so `purge_expired` sweeps these on the same retention clock —
+    keyed by RomM firmware id, with rel paths anchored at *bios_base*.
+    """
+    return _trash_into(
+        paths, key=f"bios{firmware_id}", trash_root=trash_root, anchor=bios_base, now=now
+    )
+
+
+def _trash_into(
+    paths: list[Path | tuple[Path, Path]],
+    *,
+    key: str,
+    trash_root: Path,
+    anchor: Path,
+    now: datetime | None,
+) -> Path:
+    """Shared mover behind `trash_paths` / `trash_bios_files`.
+
+    Creates `<trash_root>/<timestamp>__<key>[-<n>]/` and moves each entry
+    into it. See `trash_paths` for the per-entry `Path` / tuple contract.
+    """
     timestamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
-    base_name = f"{timestamp}__rom{rom_id}"
+    base_name = f"{timestamp}__{key}"
     target_dir = trash_root / base_name
     counter = 1
     while target_dir.exists():
@@ -70,9 +107,9 @@ def trash_paths(
         else:
             src = entry
             try:
-                rel = src.relative_to(roms_base)
+                rel = src.relative_to(anchor)
             except ValueError:
-                # Not under roms_base — fall back to a flat location with
+                # Not under the anchor — fall back to a flat location with
                 # the filename. (Sidecar callers should pass tuples to get
                 # layout-preserving placement.)
                 rel = Path(src.name)

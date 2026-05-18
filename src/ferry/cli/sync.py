@@ -40,6 +40,13 @@ from ferry.adapters.state_store import (
 from ferry.cli._utils import DEFAULT_PREVIEW
 from ferry.config import ConfigError, SavesConfig, SyncConfig, load_config
 from ferry.config.schema import Config
+from ferry.domain.bios_plan import (
+    BiosAddAction,
+    BiosDeleteAction,
+    BiosPlan,
+    BiosUpdateAction,
+    compute_bios_plan,
+)
 from ferry.domain.install_selection import (
     InstallResolution,
     ResolutionReason,
@@ -56,6 +63,7 @@ from ferry.domain.sync_plan import (
     UpdateAction,
     compute_plan,
 )
+from ferry.services.bios_executor import BiosExecutionResult, execute_bios_plan
 from ferry.services.cemu_save_backend import CemuSaveBackend
 from ferry.services.gamecube_save_backend import GameCubeSaveBackend
 from ferry.services.launch_hooks import (
@@ -103,6 +111,11 @@ logger = logging.getLogger(__name__)
     help="Skip library reconciliation; only sync save data.",
 )
 @click.option(
+    "--bios-only",
+    is_flag=True,
+    help="Skip ROM and save sync; only sync BIOS / firmware.",
+)
+@click.option(
     "--rom",
     "rom_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -119,6 +132,7 @@ def sync(
     dry_run: bool,
     full: bool,
     saves_only: bool,
+    bios_only: bool,
     rom_path: Path | None,
 ) -> None:
     """Sync the configured collection from RomM to the destination."""
@@ -133,6 +147,11 @@ def sync(
     if rom_path is not None:
         saves_only = True
 
+    if saves_only and bios_only:
+        raise click.ClickException("--saves-only and --bios-only are mutually exclusive.")
+
+    # --bios-only still resolves the configured sources (BIOS scope follows
+    # the synced platforms), so it needs the same [sync] + [destination].
     if not saves_only:
         if config.sync is None:
             raise click.ClickException(
@@ -152,7 +171,7 @@ def sync(
                 _run_saves_only(config, dry_run=dry_run, full=full, rom_path=rom_path)
             else:
                 assert config.sync is not None  # checked above
-                _run_sync(config, config.sync, dry_run=dry_run, full=full)
+                _run_sync(config, config.sync, dry_run=dry_run, full=full, bios_only=bios_only)
     except LockHeld as e:
         raise click.ClickException(
             f"another ferry sync is already running (pid {e.pid}, lock at "
@@ -163,7 +182,14 @@ def sync(
     _warn_on_launch_hook_upstream_drift()
 
 
-def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool) -> None:
+def _run_sync(
+    config: Config,
+    sync_cfg: SyncConfig,
+    *,
+    dry_run: bool,
+    full: bool,
+    bios_only: bool = False,
+) -> None:
     click.echo(f"connecting to {config.romm.url}…")
     try:
         with RommHttpAdapter(config.romm, logger) as http:
@@ -193,8 +219,27 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
 
             state_path = default_state_path()
             state = load_state(state_path)
-            _warn_if_romm_hashes_disabled(current_roms)
             trash_root = default_trash_root()
+
+            # --bios-only: skip ROM reconciliation and save sync entirely;
+            # ROM scope is still needed to know which platforms' BIOS to pull.
+            if bios_only:
+                if not dry_run:
+                    _purge_trash(trash_root, sync_cfg)
+                _run_bios_sync(
+                    config,
+                    api,
+                    current_roms,
+                    state,
+                    state_path,
+                    trash_root,
+                    dry_run=dry_run,
+                    full=full,
+                    delete_on_remove=sync_cfg.delete_on_remove,
+                )
+                return
+
+            _warn_if_romm_hashes_disabled(current_roms)
             plan = compute_plan(
                 current_roms=current_roms,
                 state=state,
@@ -203,18 +248,23 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
 
             if dry_run:
                 _print_plan(plan, full=full, config=config)
+                _run_bios_sync(
+                    config,
+                    api,
+                    current_roms,
+                    state,
+                    state_path,
+                    trash_root,
+                    dry_run=True,
+                    full=full,
+                    delete_on_remove=sync_cfg.delete_on_remove,
+                )
                 _print_save_sync_preview(config, api, state, full=full)
                 return
 
             # Purge expired trash *only* on the real-run path. Dry-run must
             # never modify state, including trash entries.
-            purged = purge_expired(trash_root, sync_cfg.trash_retention_days)
-            if purged:
-                click.echo(
-                    f"purged {purged} trash entr"
-                    f"{'y' if purged == 1 else 'ies'} older than "
-                    f"{sync_cfg.trash_retention_days} days"
-                )
+            _purge_trash(trash_root, sync_cfg)
 
             _print_plan_summary(plan)
             will_act = bool(
@@ -231,6 +281,17 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
                         "longer in collection ([sync].delete_on_remove = false)."
                     )
                     click.echo("Set delete_on_remove = true in your config to trash them.")
+                _run_bios_sync(
+                    config,
+                    api,
+                    current_roms,
+                    state,
+                    state_path,
+                    trash_root,
+                    dry_run=False,
+                    full=full,
+                    delete_on_remove=sync_cfg.delete_on_remove,
+                )
                 _run_all_save_syncs(save_backends, state, state_path)
                 return
 
@@ -255,6 +316,17 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
                 ),
             )
             _print_execution_summary(plan, result)
+            _run_bios_sync(
+                config,
+                api,
+                current_roms,
+                state,
+                state_path,
+                trash_root,
+                dry_run=False,
+                full=full,
+                delete_on_remove=sync_cfg.delete_on_remove,
+            )
             _run_all_save_syncs(save_backends, state, state_path)
     except RommAuthError as e:
         raise click.ClickException(
@@ -262,6 +334,192 @@ def _run_sync(config: Config, sync_cfg: SyncConfig, *, dry_run: bool, full: bool
         ) from e
     except RommApiError as e:
         raise click.ClickException(str(e)) from e
+
+
+def _purge_trash(trash_root: Path, sync_cfg: SyncConfig) -> None:
+    """Purge expired trash entries, echoing a one-line count when any go."""
+    purged = purge_expired(trash_root, sync_cfg.trash_retention_days)
+    if purged:
+        click.echo(
+            f"purged {purged} trash entr"
+            f"{'y' if purged == 1 else 'ies'} older than "
+            f"{sync_cfg.trash_retention_days} days"
+        )
+
+
+# ---------------------------------------------------------------------------
+# BIOS / firmware sync (v5.5)
+# ---------------------------------------------------------------------------
+
+
+def _bios_platforms_from_roms(current_roms: list[dict[str, Any]]) -> dict[int, str]:
+    """Distinct `platform_id → platform_slug` across the synced ROM set.
+
+    BIOS sync scope follows ROM sync scope: ferry pulls firmware for every
+    platform that has at least one ROM in the configured collections /
+    platforms. Deriving it from `current_roms` handles collections (whose
+    platforms aren't known until the ROMs are fetched) for free.
+    """
+    platforms: dict[int, str] = {}
+    for rom in current_roms:
+        pid = rom.get("platform_id")
+        slug = rom.get("platform_slug")
+        if isinstance(pid, int) and isinstance(slug, str) and slug:
+            platforms.setdefault(pid, slug)
+    return platforms
+
+
+def _run_bios_sync(
+    config: Config,
+    api: RommApi,
+    current_roms: list[dict[str, Any]],
+    state: LibraryState,
+    state_path: Path,
+    trash_root: Path,
+    *,
+    dry_run: bool,
+    full: bool,
+    delete_on_remove: bool,
+) -> None:
+    """Sync BIOS / firmware for the in-scope platforms (DESIGN.md §5.2, v5.5).
+
+    A no-op when `[bios]` is absent. Skips with a hint when disabled or
+    when the destination has no central BIOS directory (bare ES-DE).
+    """
+    bios_cfg = config.bios
+    if bios_cfg is None:
+        return  # [bios] not configured — opt-in, stay silent
+    if not bios_cfg.enabled:
+        click.echo("")
+        click.echo("BIOS sync: disabled ([bios].enabled = false)")
+        return
+    if config.destination is None or config.destination.bios_base is None:
+        click.echo("")
+        click.echo(
+            "BIOS sync: skipped — no central BIOS directory configured.\n"
+            "  Set [destination].bios_base, or use a preset that centralizes\n"
+            "  BIOS (retrodeck-flatpak, emudeck)."
+        )
+        return
+
+    platforms = _bios_platforms_from_roms(current_roms)
+    if not platforms:
+        return
+
+    click.echo("")
+    click.echo("fetching firmware…")
+    firmware_by_platform: dict[str, list[dict[str, Any]]] = {}
+    for pid, slug in platforms.items():
+        firmware_by_platform[slug] = api.list_firmware(pid)
+    total_fw = sum(len(v) for v in firmware_by_platform.values())
+    click.echo(f"✓ {total_fw} firmware file(s) across {len(firmware_by_platform)} platform(s)")
+
+    plan = compute_bios_plan(
+        firmware_by_platform=firmware_by_platform,
+        state=state,
+        allowlists=bios_cfg.files,
+        bios_base=config.destination.bios_base,
+    )
+
+    if dry_run:
+        _print_bios_plan(plan, full=full, delete_on_remove=delete_on_remove)
+        return
+
+    _print_bios_plan_summary(plan)
+    will_act = bool(plan.to_add or plan.to_update or (plan.to_delete and delete_on_remove))
+    if not will_act:
+        if plan.is_empty:
+            click.echo("BIOS: nothing to do — local state matches RomM.")
+        elif plan.to_delete:
+            click.echo(
+                f"BIOS: nothing to execute — {len(plan.to_delete)} file(s) no longer "
+                "in RomM ([sync].delete_on_remove = false)."
+            )
+        return
+
+    click.echo("")
+    click.echo("Syncing BIOS / firmware…")
+    click.echo("")
+    result = execute_bios_plan(
+        plan=plan,
+        api=api,
+        state=state,
+        state_path=state_path,
+        destination=config.destination,
+        trash_root=trash_root,
+        delete_on_remove=delete_on_remove,
+        progress=click.echo,
+    )
+    _print_bios_execution_summary(result)
+
+
+def _print_bios_plan_summary(plan: BiosPlan) -> None:
+    click.echo("")
+    click.echo("BIOS sync plan:")
+    click.echo(f"  Add:        {len(plan.to_add)}")
+    click.echo(f"  Update:     {len(plan.to_update)}")
+    click.echo(f"  Delete:     {len(plan.to_delete)}")
+    click.echo(f"  Unchanged:  {plan.unchanged_count}")
+
+
+def _print_bios_plan(plan: BiosPlan, *, full: bool, delete_on_remove: bool) -> None:
+    _print_bios_plan_summary(plan)
+    cap = None if full else DEFAULT_PREVIEW
+    _print_bios_section("To add", plan.to_add, "+", cap)
+    _print_bios_section("To update", plan.to_update, "↻", cap)
+    if plan.to_delete:
+        title = (
+            "To delete"
+            if delete_on_remove
+            else "No longer in RomM (would trash if `[sync].delete_on_remove = true`)"
+        )
+        _print_bios_section(title, plan.to_delete, "-", cap)
+
+
+def _print_bios_section(
+    title: str,
+    items: list[BiosAddAction] | list[BiosUpdateAction] | list[BiosDeleteAction],
+    sigil: str,
+    cap: int | None,
+) -> None:
+    if not items:
+        return
+    click.echo("")
+    click.echo(f"{title} ({len(items)}):")
+    shown = items if cap is None else items[:cap]
+    for a in shown:
+        line = f"  {sigil} {a.file_name} ({a.platform_slug})"
+        if isinstance(a, BiosDeleteAction):
+            line += f" → {a.previous.path}"
+        else:
+            line += f" → {a.target_path}"
+            if a.unverified:
+                line += "  ⚠ unverified"
+        click.echo(line)
+    if cap is not None and len(items) > cap:
+        click.echo(f"  ... and {len(items) - cap} more (run with --full to list all)")
+
+
+def _print_bios_execution_summary(result: BiosExecutionResult) -> None:
+    click.echo("")
+    click.echo("BIOS sync complete:")
+    click.echo(f"  Synced:  {len(result.succeeded)}")
+    click.echo(f"  Deleted: {len(result.deleted)}")
+    click.echo(f"  Failed:  {len(result.failed)}")
+    if result.failed:
+        click.echo("")
+        click.echo("Failures:")
+        for f in result.failed:
+            click.echo(f"  ✗ {f.file_name} ({f.platform_slug}): {f.error}")
+        click.echo("")
+        click.echo("Re-running sync will retry failed actions.")
+    if result.deleted:
+        click.echo("")
+        click.echo("Trashed BIOS files (recoverable until retention expires):")
+        for d in result.deleted[:DEFAULT_PREVIEW]:
+            click.echo(f"  - {d.file_name} ({d.platform_slug}) → {d.trash_dir}")
+        if len(result.deleted) > DEFAULT_PREVIEW:
+            click.echo(f"  ... and {len(result.deleted) - DEFAULT_PREVIEW} more")
 
 
 def _run_saves_only(

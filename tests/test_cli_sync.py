@@ -22,7 +22,9 @@ def write_config(
     platforms: tuple[str, ...] = (),
     include_destination: bool = True,
     roms_base: Path | None = None,
+    bios_base: Path | None = None,
     transforms_section: str | None = None,
+    bios_section: str | None = None,
 ) -> Path:
     parts = [
         "[romm]",
@@ -34,6 +36,8 @@ def write_config(
             parts += ["", "[destination]", 'preset = "esde-native"']
         else:
             parts += ["", "[destination]", f'roms_base = "{roms_base}"']
+            if bios_base is not None:
+                parts.append(f'bios_base = "{bios_base}"')
     parts += ["", "[sync]"]
     if collections:
         parts.append(f"collections = {list(collections)!r}")
@@ -41,6 +45,8 @@ def write_config(
         parts.append(f"platforms = {list(platforms)!r}")
     if transforms_section:
         parts += ["", transforms_section]
+    if bios_section:
+        parts += ["", bios_section]
     cfg.write_text("\n".join(parts) + "\n")
     return cfg
 
@@ -1003,3 +1009,210 @@ def test_sync_no_warning_for_local_drift_only(tmp_path: Path, monkeypatch) -> No
     result = runner.invoke(app, ["--config", str(cfg), "sync", "--saves-only", "--dry-run"], env={})
     assert result.exit_code == 0, result.output
     assert "⚠ launch hooks:" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# BIOS / firmware sync (v5.5)
+# ---------------------------------------------------------------------------
+
+
+def _mock_firmware_list(firmware: list[dict]) -> None:
+    respx.get(f"{BASE_URL}/api/firmware").mock(return_value=httpx.Response(200, json=firmware))
+
+
+@respx.mock
+def test_bios_sync_lands_firmware(tmp_path: Path, monkeypatch) -> None:
+    """A full `ferry sync` with [bios] pulls firmware into bios_base."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    roms_base = tmp_path / "myroms"
+    bios_base = tmp_path / "mybios"
+    cfg = write_config(
+        tmp_path / "config.toml",
+        roms_base=roms_base,
+        bios_base=bios_base,
+        bios_section="[bios]",
+    )
+
+    payload = make_zip_bytes({"Game.iso": b"iso"})
+    mock_endpoints(
+        collections=[{"id": 6, "name": "Steam Deck"}],
+        rom_items=[
+            {
+                "id": 101,
+                "name": "Game",
+                "platform_slug": "ps2",
+                "platform_id": 12,
+                "fs_name": "Game.zip",
+                "updated_at": "2026-04-25T12:00:00Z",
+            }
+        ],
+    )
+    import urllib.parse
+
+    enc = urllib.parse.quote("Game.zip", safe="")
+    respx.get(f"{BASE_URL}/api/roms/101/content/{enc}").mock(
+        return_value=httpx.Response(200, content=payload)
+    )
+    _mock_firmware_list(
+        [
+            {
+                "id": 50,
+                "file_name": "ps2-0230a.bin",
+                "md5_hash": "",
+                "file_size_bytes": 0,
+                "is_verified": True,
+            }
+        ]
+    )
+    fw_bytes = b"ps2-bios-bytes"
+    respx.get(f"{BASE_URL}/api/firmware/50/content/ps2-0230a.bin").mock(
+        return_value=httpx.Response(200, content=fw_bytes)
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync"], env={})
+    assert result.exit_code == 0, result.output
+    assert (bios_base / "ps2-0230a.bin").read_bytes() == fw_bytes
+    assert "BIOS sync complete" in result.output
+
+
+@respx.mock
+def test_bios_only_skips_rom_download(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    roms_base = tmp_path / "myroms"
+    bios_base = tmp_path / "mybios"
+    cfg = write_config(
+        tmp_path / "config.toml",
+        roms_base=roms_base,
+        bios_base=bios_base,
+        bios_section="[bios]",
+    )
+    mock_endpoints(
+        collections=[{"id": 6, "name": "Steam Deck"}],
+        rom_items=[
+            {
+                "id": 101,
+                "name": "Game",
+                "platform_slug": "ps2",
+                "platform_id": 12,
+                "fs_name": "Game.zip",
+                "updated_at": "2026-04-25T12:00:00Z",
+            }
+        ],
+    )
+    rom_route = respx.get(url__regex=rf"{BASE_URL}/api/roms/101/content/.*").mock(
+        return_value=httpx.Response(200, content=b"never-fetched")
+    )
+    _mock_firmware_list(
+        [
+            {
+                "id": 50,
+                "file_name": "ps2.bin",
+                "md5_hash": "",
+                "file_size_bytes": 0,
+                "is_verified": True,
+            }
+        ]
+    )
+    respx.get(f"{BASE_URL}/api/firmware/50/content/ps2.bin").mock(
+        return_value=httpx.Response(200, content=b"bios")
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--bios-only"], env={})
+    assert result.exit_code == 0, result.output
+    assert (bios_base / "ps2.bin").exists()
+    assert not rom_route.called  # ROM content never downloaded
+    assert "Executing plan" not in result.output
+
+
+@respx.mock
+def test_bios_dry_run_shows_plan(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cfg = write_config(
+        tmp_path / "config.toml",
+        roms_base=tmp_path / "myroms",
+        bios_base=tmp_path / "mybios",
+        bios_section="[bios]",
+    )
+    mock_endpoints(
+        collections=[{"id": 6, "name": "Steam Deck"}],
+        rom_items=[
+            {
+                "id": 101,
+                "name": "Game",
+                "platform_slug": "ps2",
+                "platform_id": 12,
+                "fs_name": "Game.zip",
+                "updated_at": "2026-04-25T12:00:00Z",
+            }
+        ],
+    )
+    _mock_firmware_list(
+        [
+            {
+                "id": 50,
+                "file_name": "ps2.bin",
+                "md5_hash": "x",
+                "file_size_bytes": 4,
+                "is_verified": False,
+            }
+        ]
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--bios-only", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "BIOS sync plan:" in result.output
+    assert "ps2.bin" in result.output
+    assert "unverified" in result.output  # is_verified false surfaced
+    assert not (tmp_path / "mybios" / "ps2.bin").exists()  # dry run touched nothing
+
+
+@respx.mock
+def test_bios_disabled_section_skips(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cfg = write_config(
+        tmp_path / "config.toml",
+        roms_base=tmp_path / "myroms",
+        bios_base=tmp_path / "mybios",
+        bios_section="[bios]\nenabled = false",
+    )
+    mock_endpoints(collections=[{"id": 6, "name": "Steam Deck"}], rom_items=[])
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "BIOS sync: disabled" in result.output
+
+
+@respx.mock
+def test_bios_skipped_when_no_bios_base(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    # roms_base form without bios_base → destination.bios_base is None.
+    cfg = write_config(
+        tmp_path / "config.toml",
+        roms_base=tmp_path / "myroms",
+        bios_section="[bios]",
+    )
+    mock_endpoints(collections=[{"id": 6, "name": "Steam Deck"}], rom_items=[])
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "no central BIOS directory" in result.output
+
+
+def test_saves_only_and_bios_only_are_mutually_exclusive(tmp_path: Path) -> None:
+    cfg = write_config(tmp_path / "config.toml")
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["--config", str(cfg), "sync", "--saves-only", "--bios-only"], env={}
+    )
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
