@@ -123,16 +123,23 @@ class RommApi:
     # Firmware / BIOS (DESIGN.md §5.2, v5.5)
     # ------------------------------------------------------------------
 
-    def list_firmware(self, platform_id: int) -> list[dict[str, Any]]:
-        """GET /api/firmware?platform_id= — firmware records for one platform.
+    def list_firmware(self, platform_id: int | None = None) -> list[dict[str, Any]]:
+        """GET /api/firmware — firmware records, optionally filtered by platform.
 
         RomM models firmware (BIOS) per-platform, not per-ROM. Each record
         carries `file_name`, the three hashes, and `is_verified` (RomM's
-        match against its curated known-BIOS database). Callers fetch one
-        platform at a time — ferry's BIOS sync scope follows `[sync]`, so
-        the platform set is already resolved before this is called.
+        match against its curated known-BIOS database).
+
+        Pass `platform_id` to fetch one platform's firmware — BIOS sync
+        does this per in-scope platform. With no argument, returns every
+        firmware record in the library; the schema carries no platform
+        field, so the bulk form is only used for the lightweight "you
+        could enable `[bios]`" nudge, not for sync itself.
         """
-        result = self._http.get_json("/api/firmware", params={"platform_id": platform_id})
+        params: dict[str, Any] = {}
+        if platform_id is not None:
+            params["platform_id"] = platform_id
+        result = self._http.get_json("/api/firmware", params=params)
         return result if isinstance(result, list) else []
 
     def download_firmware(

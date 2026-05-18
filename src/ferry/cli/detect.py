@@ -53,6 +53,5 @@ def _print_no_candidates() -> None:
     click.echo("")
     click.echo("    [destination]")
     click.echo('    roms_base = "/path/to/roms"')
-    click.echo('    # bios_base = "/path/to/bios"   # optional')
     click.echo("")
     click.echo(f"Or pick a known preset: {known}")

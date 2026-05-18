@@ -360,6 +360,19 @@ def test_list_firmware_handles_platform_with_no_firmware() -> None:
 
 
 @respx.mock
+def test_list_firmware_no_arg_returns_whole_library() -> None:
+    """No platform_id → every firmware record (the bulk nudge form)."""
+    route = respx.get(f"{BASE_URL}/api/firmware").mock(
+        return_value=httpx.Response(200, json=[{"id": 1}, {"id": 2}, {"id": 3}])
+    )
+    with RommHttpAdapter(make_config()) as http:
+        api = RommApi(http)
+        firmware = api.list_firmware()
+    assert "platform_id" not in str(route.calls.last.request.url)
+    assert len(firmware) == 3
+
+
+@respx.mock
 def test_download_firmware_streams_to_dest_and_returns_hash(tmp_path) -> None:
     respx.get(f"{BASE_URL}/api/firmware/7/content/ps2-0230a-20080220.bin").mock(
         return_value=httpx.Response(200, content=_PAYLOAD)

@@ -49,9 +49,12 @@ def resolve_preset(name: str, home: Path) -> tuple[Path, Path | None]:
 class Destination:
     """Where ferry lands ROM and BIOS files on disk.
 
-    `bios_base` may be None when the frontend doesn't centralize BIOS placement
-    (bare ES-DE). v1 BIOS routing dispatches to per-emulator paths in that
-    case via the registry.
+    `bios_base` is the frontend's central BIOS directory. It is derived
+    purely from the preset — there is no `[destination].bios_base` config
+    key (a standalone override could diverge from where the frontend's
+    emulators actually read BIOS). It is None for presets without a
+    central BIOS pile (bare ES-DE) and for explicit-paths configs; BIOS
+    sync skips in that case.
 
     `preset` is display-only metadata recording which recipe (if any) the
     config used; the actual paths are always carried explicitly so callers

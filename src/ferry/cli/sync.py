@@ -369,6 +369,30 @@ def _bios_platforms_from_roms(current_roms: list[dict[str, Any]]) -> dict[int, s
     return platforms
 
 
+def _nudge_bios_available(config: Config, api: RommApi) -> None:
+    """When `[bios]` is absent, hint that RomM has firmware ferry could sync.
+
+    Opt-in stays opt-in — this only surfaces the feature's existence. The
+    bulk `/api/firmware` call carries no platform field, so the count is
+    library-wide rather than scoped; that's accurate enough for a nudge.
+    Any API error is swallowed — a nudge must never disturb the sync.
+    """
+    if config.destination is None or config.destination.bios_base is None:
+        return  # no central BIOS dir — nothing to nudge toward
+    try:
+        firmware = api.list_firmware()
+    except RommApiError:
+        return
+    if not firmware:
+        return
+    click.echo("")
+    click.echo(
+        f"note: RomM has {len(firmware)} firmware file(s) in your library. "
+        "Add a [bios] section to your config to sync BIOS to "
+        f"{config.destination.bios_base}."
+    )
+
+
 def _run_bios_sync(
     config: Config,
     api: RommApi,
@@ -383,12 +407,14 @@ def _run_bios_sync(
 ) -> None:
     """Sync BIOS / firmware for the in-scope platforms (DESIGN.md §5.2, v5.5).
 
-    A no-op when `[bios]` is absent. Skips with a hint when disabled or
-    when the destination has no central BIOS directory (bare ES-DE).
+    When `[bios]` is absent, prints a one-line nudge if RomM actually has
+    firmware to sync (opt-in discoverability). Skips with a hint when
+    disabled or when the destination has no central BIOS directory.
     """
     bios_cfg = config.bios
     if bios_cfg is None:
-        return  # [bios] not configured — opt-in, stay silent
+        _nudge_bios_available(config, api)
+        return
     if not bios_cfg.enabled:
         click.echo("")
         click.echo("BIOS sync: disabled ([bios].enabled = false)")
@@ -396,9 +422,8 @@ def _run_bios_sync(
     if config.destination is None or config.destination.bios_base is None:
         click.echo("")
         click.echo(
-            "BIOS sync: skipped — no central BIOS directory configured.\n"
-            "  Set [destination].bios_base, or use a preset that centralizes\n"
-            "  BIOS (retrodeck-flatpak, emudeck)."
+            "BIOS sync: skipped — this destination has no central BIOS directory.\n"
+            "  Use a preset that centralizes BIOS (retrodeck-flatpak, emudeck)."
         )
         return
 

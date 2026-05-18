@@ -27,7 +27,7 @@ _TOP_LEVEL_KEYS = frozenset(
 )
 _LAUNCH_HOOKS_KEYS = frozenset({"log_enabled", "log_path"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
-_DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
+_DESTINATION_KEYS = frozenset({"preset", "roms_base"})
 _SYNC_KEYS = frozenset(
     {
         "collections",
@@ -358,8 +358,12 @@ def _parse_destination(raw: dict, path: Path) -> Destination | None:
         return None
     preset_name = dest.get("preset")
     roms_raw = dest.get("roms_base")
-    bios_raw = dest.get("bios_base")
 
+    # `bios_base` is NOT a user-settable key — it's derived from the preset
+    # only. A standalone override could silently diverge from where the
+    # frontend's emulators actually read BIOS (the wrong-folder footgun
+    # v5.5 ck3.5 removed). Preset → its `bios/`; explicit-paths config →
+    # None (no central pile; BIOS sync skips, same as bare ES-DE).
     if preset_name is not None:
         if not isinstance(preset_name, str):
             raise ConfigInvalidError(f"[destination].preset must be a string in {path}")
@@ -368,17 +372,15 @@ def _parse_destination(raw: dict, path: Path) -> Destination | None:
             raise ConfigInvalidError(f"unknown preset {preset_name!r} in {path}; known: {known}")
         default_roms, default_bios = resolve_preset(preset_name, Path.home())
         roms_base = _require_path(roms_raw, default_roms, "[destination].roms_base", path)
-        bios_base = _optional_path(bios_raw, default_bios, "[destination].bios_base", path)
-        return Destination(roms_base=roms_base, bios_base=bios_base, preset=preset_name)
+        return Destination(roms_base=roms_base, bios_base=default_bios, preset=preset_name)
 
     if roms_raw is None:
         raise ConfigInvalidError(
-            f"[destination] in {path} requires either `preset` or `roms_base` "
-            f"(`bios_base` is optional)."
+            f"[destination] in {path} requires either `preset` or `roms_base`."
         )
     return Destination(
         roms_base=_require_path(roms_raw, None, "[destination].roms_base", path),
-        bios_base=_optional_path(bios_raw, None, "[destination].bios_base", path),
+        bios_base=None,
         preset=None,
     )
 
@@ -387,14 +389,6 @@ def _require_path(raw: object, default: Path | None, label: str, path: Path) -> 
     if raw is None:
         if default is None:
             raise ConfigInvalidError(f"{label} is required in {path}")
-        return default
-    if not isinstance(raw, str) or not raw:
-        raise ConfigInvalidError(f"{label} must be a non-empty string in {path}")
-    return Path(raw).expanduser()
-
-
-def _optional_path(raw: object, default: Path | None, label: str, path: Path) -> Path | None:
-    if raw is None:
         return default
     if not isinstance(raw, str) or not raw:
         raise ConfigInvalidError(f"{label} must be a non-empty string in {path}")

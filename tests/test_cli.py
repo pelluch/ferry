@@ -147,20 +147,19 @@ def test_ping_with_custom_destination_labels_as_custom(tmp_path: Path) -> None:
     mock_romm_endpoints()
     cfg = tmp_path / "config.toml"
     roms = tmp_path / "roms"
-    bios = tmp_path / "bios"
     roms.mkdir()
-    bios.mkdir()
     cfg.write_text(
         '[romm]\nurl = "https://romm.example.tld"\n'
         'api_key = "rmm_abcdef0123456789"\n'
-        f'[destination]\nroms_base = "{roms}"\nbios_base = "{bios}"\n'
+        f'[destination]\nroms_base = "{roms}"\n'
     )
     runner = CliRunner()
     result = runner.invoke(app, ["--config", str(cfg), "ping"], env={})
     assert result.exit_code == 0, result.output
     assert "destination.preset:      (custom)" in result.output
     assert f"{roms} (exists)" in result.output
-    assert f"{bios} (exists)" in result.output
+    # An explicit-paths config has no central BIOS dir.
+    assert "no centralized BIOS root" in result.output
 
 
 @respx.mock

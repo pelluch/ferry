@@ -22,7 +22,7 @@ def write_config(
     platforms: tuple[str, ...] = (),
     include_destination: bool = True,
     roms_base: Path | None = None,
-    bios_base: Path | None = None,
+    preset: str | None = None,
     transforms_section: str | None = None,
     bios_section: str | None = None,
 ) -> Path:
@@ -32,12 +32,12 @@ def write_config(
         'api_key = "rmm_abcdef0123456789"',
     ]
     if include_destination:
-        if roms_base is None:
+        if preset is not None:
+            parts += ["", "[destination]", f'preset = "{preset}"']
+        elif roms_base is None:
             parts += ["", "[destination]", 'preset = "esde-native"']
         else:
             parts += ["", "[destination]", f'roms_base = "{roms_base}"']
-            if bios_base is not None:
-                parts.append(f'bios_base = "{bios_base}"')
     parts += ["", "[sync]"]
     if collections:
         parts.append(f"collections = {list(collections)!r}")
@@ -1022,15 +1022,13 @@ def _mock_firmware_list(firmware: list[dict]) -> None:
 
 @respx.mock
 def test_bios_sync_lands_firmware(tmp_path: Path, monkeypatch) -> None:
-    """A full `ferry sync` with [bios] pulls firmware into bios_base."""
+    """A full `ferry sync` with [bios] pulls firmware into the preset's bios dir."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    roms_base = tmp_path / "myroms"
-    bios_base = tmp_path / "mybios"
+    bios_base = tmp_path / "retrodeck" / "bios"
     cfg = write_config(
         tmp_path / "config.toml",
-        roms_base=roms_base,
-        bios_base=bios_base,
+        preset="retrodeck-flatpak",
         bios_section="[bios]",
     )
 
@@ -1081,12 +1079,10 @@ def test_bios_sync_lands_firmware(tmp_path: Path, monkeypatch) -> None:
 def test_bios_only_skips_rom_download(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    roms_base = tmp_path / "myroms"
-    bios_base = tmp_path / "mybios"
+    bios_base = tmp_path / "retrodeck" / "bios"
     cfg = write_config(
         tmp_path / "config.toml",
-        roms_base=roms_base,
-        bios_base=bios_base,
+        preset="retrodeck-flatpak",
         bios_section="[bios]",
     )
     mock_endpoints(
@@ -1134,8 +1130,7 @@ def test_bios_dry_run_shows_plan(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     cfg = write_config(
         tmp_path / "config.toml",
-        roms_base=tmp_path / "myroms",
-        bios_base=tmp_path / "mybios",
+        preset="retrodeck-flatpak",
         bios_section="[bios]",
     )
     mock_endpoints(
@@ -1169,7 +1164,8 @@ def test_bios_dry_run_shows_plan(tmp_path: Path, monkeypatch) -> None:
     assert "BIOS sync plan:" in result.output
     assert "ps2.bin" in result.output
     assert "unverified" in result.output  # is_verified false surfaced
-    assert not (tmp_path / "mybios" / "ps2.bin").exists()  # dry run touched nothing
+    # dry run touched nothing
+    assert not (tmp_path / "retrodeck" / "bios" / "ps2.bin").exists()
 
 
 @respx.mock
@@ -1178,8 +1174,7 @@ def test_bios_disabled_section_skips(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     cfg = write_config(
         tmp_path / "config.toml",
-        roms_base=tmp_path / "myroms",
-        bios_base=tmp_path / "mybios",
+        preset="retrodeck-flatpak",
         bios_section="[bios]\nenabled = false",
     )
     mock_endpoints(collections=[{"id": 6, "name": "Steam Deck"}], rom_items=[])
@@ -1206,6 +1201,45 @@ def test_bios_skipped_when_no_bios_base(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
     assert result.exit_code == 0, result.output
     assert "no central BIOS directory" in result.output
+
+
+@respx.mock
+def test_bios_nudge_shown_when_section_absent(tmp_path: Path, monkeypatch) -> None:
+    """No [bios], but RomM has firmware → one-line discoverability nudge."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cfg = write_config(tmp_path / "config.toml", preset="retrodeck-flatpak")  # no [bios]
+    mock_endpoints(collections=[{"id": 6, "name": "Steam Deck"}], rom_items=[])
+    _mock_firmware_list(
+        [
+            {
+                "id": 50,
+                "file_name": "ps2.bin",
+                "md5_hash": "",
+                "file_size_bytes": 0,
+                "is_verified": True,
+            }
+        ]
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "Add a [bios] section" in result.output
+
+
+@respx.mock
+def test_bios_no_nudge_when_romm_has_no_firmware(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cfg = write_config(tmp_path / "config.toml", preset="retrodeck-flatpak")  # no [bios]
+    mock_endpoints(collections=[{"id": 6, "name": "Steam Deck"}], rom_items=[])
+    _mock_firmware_list([])
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["--config", str(cfg), "sync", "--dry-run"], env={})
+    assert result.exit_code == 0, result.output
+    assert "[bios] section" not in result.output
 
 
 def test_saves_only_and_bios_only_are_mutually_exclusive(tmp_path: Path) -> None:

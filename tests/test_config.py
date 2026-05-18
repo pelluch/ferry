@@ -180,44 +180,29 @@ def test_destination_preset_resolves_under_home(tmp_path: Path, fake_home: Path)
     assert dest.bios_base == fake_home / "retrodeck/bios"
 
 
-def test_destination_preset_with_bios_override(tmp_path: Path, fake_home: Path) -> None:
-    cfg_file = write(
-        tmp_path / "config.toml",
-        minimal_toml()
-        + '\n[destination]\npreset = "retrodeck-flatpak"\nbios_base = "/mnt/sd/bios"\n',
-    )
-    loaded = load_config(cfg_file, env={})
-    dest = loaded.config.destination
-    assert dest is not None
-    assert dest.preset == "retrodeck-flatpak"
-    assert dest.roms_base == fake_home / "retrodeck/roms"  # preset default
-    assert dest.bios_base == Path("/mnt/sd/bios")  # explicit override
-
-
 def test_destination_explicit_paths_no_preset(tmp_path: Path) -> None:
+    """An explicit-paths config has no central BIOS pile — bios_base is None."""
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + '\n[destination]\nroms_base = "/data/roms"\nbios_base = "/data/bios"\n',
+        minimal_toml() + '\n[destination]\nroms_base = "/data/roms"\n',
     )
     loaded = load_config(cfg_file, env={})
     dest = loaded.config.destination
     assert dest is not None
     assert dest.preset is None
     assert dest.roms_base == Path("/data/roms")
-    assert dest.bios_base == Path("/data/bios")
+    assert dest.bios_base is None
 
 
 def test_destination_path_expanduser_is_applied(tmp_path: Path, fake_home: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml()
-        + '\n[destination]\nroms_base = "~/games/roms"\nbios_base = "~/games/bios"\n',
+        minimal_toml() + '\n[destination]\nroms_base = "~/games/roms"\n',
     )
     loaded = load_config(cfg_file, env={})
     dest = loaded.config.destination
     assert dest is not None
     assert dest.roms_base == fake_home / "games/roms"
-    assert dest.bios_base == fake_home / "games/bios"
 
 
 def test_destination_unknown_preset_raises(tmp_path: Path) -> None:
@@ -248,12 +233,13 @@ def test_destination_explicit_roms_only_is_valid(tmp_path: Path) -> None:
     assert dest.bios_base is None
 
 
-def test_destination_bios_without_roms_raises(tmp_path: Path) -> None:
+def test_destination_bios_base_key_is_rejected(tmp_path: Path) -> None:
+    """`bios_base` is not a config key — it's preset-derived (v5.5 ck3.5)."""
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + '\n[destination]\nbios_base = "/data/bios"\n',
+        minimal_toml() + '\n[destination]\nroms_base = "/data/roms"\nbios_base = "/data/bios"\n',
     )
-    with pytest.raises(ConfigInvalidError, match="preset.*roms_base"):
+    with pytest.raises(ConfigInvalidError, match=r"unknown keys under \[destination\]"):
         load_config(cfg_file, env={})
 
 
@@ -268,18 +254,6 @@ def test_destination_esde_native_preset_has_none_bios(tmp_path: Path, fake_home:
     assert dest.preset == "esde-native"
     assert dest.roms_base == fake_home / "ROMs"
     assert dest.bios_base is None
-
-
-def test_destination_esde_native_can_override_bios(tmp_path: Path, fake_home: Path) -> None:
-    """User can opt into a centralized BIOS even when the preset doesn't have one."""
-    cfg_file = write(
-        tmp_path / "config.toml",
-        minimal_toml() + '\n[destination]\npreset = "esde-native"\nbios_base = "/srv/bios"\n',
-    )
-    loaded = load_config(cfg_file, env={})
-    dest = loaded.config.destination
-    assert dest is not None
-    assert dest.bios_base == Path("/srv/bios")
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +493,7 @@ def test_destination_unknown_key_raises(tmp_path: Path) -> None:
 def test_destination_path_must_be_string(tmp_path: Path) -> None:
     cfg_file = write(
         tmp_path / "config.toml",
-        minimal_toml() + "\n[destination]\nroms_base = 1\nbios_base = 2\n",
+        minimal_toml() + "\n[destination]\nroms_base = 1\n",
     )
     with pytest.raises(ConfigInvalidError, match="roms_base"):
         load_config(cfg_file, env={})
