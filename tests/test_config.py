@@ -636,6 +636,91 @@ def test_saves_unknown_key_raises(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# [bios] section (v5.5)
+# ---------------------------------------------------------------------------
+
+
+def test_no_bios_section_yields_none(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml())
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.bios is None
+
+
+def test_empty_bios_section_defaults_to_enabled(tmp_path: Path) -> None:
+    """Bare `[bios]` opts in — `enabled` defaults to true."""
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[bios]\n")
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.bios is not None
+    assert loaded.config.bios.enabled is True
+    assert loaded.config.bios.files == {}
+
+
+def test_bios_enabled_explicit_false(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[bios]\nenabled = false\n")
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.bios is not None
+    assert loaded.config.bios.enabled is False
+
+
+def test_bios_files_allowlist_parsed(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml()
+        + "\n[bios]\n[bios.files]\n"
+        + 'ps2 = ["ps2-0230a-20080220.bin"]\n'
+        + 'dc = ["dc_boot.bin", "dc_flash.bin"]\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.bios is not None
+    assert loaded.config.bios.files["ps2"] == ("ps2-0230a-20080220.bin",)
+    assert loaded.config.bios.files["dc"] == ("dc_boot.bin", "dc_flash.bin")
+    assert loaded.config.bios.allowlist_for("ps2") == ("ps2-0230a-20080220.bin",)
+    assert loaded.config.bios.allowlist_for("snes") is None
+
+
+def test_bios_files_dedups_within_a_platform(tmp_path: Path) -> None:
+    cfg_file = write(
+        tmp_path / "config.toml",
+        minimal_toml() + '\n[bios.files]\nps2 = ["a.bin", "a.bin", "b.bin"]\n',
+    )
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.bios is not None
+    assert loaded.config.bios.files["ps2"] == ("a.bin", "b.bin")
+
+
+def test_bios_files_empty_list_is_valid(tmp_path: Path) -> None:
+    """An empty allowlist means 'sync no firmware for this platform'."""
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[bios.files]\nps2 = []\n")
+    loaded = load_config(cfg_file, env={})
+    assert loaded.config.bios is not None
+    assert loaded.config.bios.allowlist_for("ps2") == ()
+
+
+def test_bios_enabled_must_be_bool(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + '\n[bios]\nenabled = "yes"\n')
+    with pytest.raises(ConfigInvalidError, match=r"\[bios\].enabled must be a boolean"):
+        load_config(cfg_file, env={})
+
+
+def test_bios_files_must_be_list_of_strings(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + "\n[bios.files]\nps2 = [1, 2]\n")
+    with pytest.raises(ConfigInvalidError, match=r"\[bios.files\].ps2 must be a list"):
+        load_config(cfg_file, env={})
+
+
+def test_bios_section_must_be_table(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", f'bios = "on"\n{minimal_toml()}')
+    with pytest.raises(ConfigInvalidError, match=r"\[bios\] must be a table"):
+        load_config(cfg_file, env={})
+
+
+def test_bios_unknown_key_raises(tmp_path: Path) -> None:
+    cfg_file = write(tmp_path / "config.toml", minimal_toml() + '\n[bios]\nbogus = "x"\n')
+    with pytest.raises(ConfigInvalidError, match=r"unknown keys under \[bios\]"):
+        load_config(cfg_file, env={})
+
+
+# ---------------------------------------------------------------------------
 # [launch_hooks] section (v8)
 # ---------------------------------------------------------------------------
 

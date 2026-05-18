@@ -77,6 +77,30 @@ class SavesConfig:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class BiosConfig:
+    """Settings for BIOS / firmware sync (DESIGN.md §5.2, v5.5).
+
+    Presence of `[bios]` opts the user into BIOS sync; `enabled = true`
+    by default lets the bare section act as the on switch. Set
+    `enabled = false` to keep the section configured but paused.
+
+    BIOS sync *scope* follows `[sync]` — firmware is fetched for the same
+    platforms ferry already syncs ROMs for. `files` optionally refines
+    *which* firmware files sync within a platform: a platform slug absent
+    from `files` syncs every firmware RomM has for it; a slug present
+    syncs only the named files. An empty list syncs none for that slug.
+    """
+
+    enabled: bool = True
+    # platform slug -> filename allowlist. See class docstring.
+    files: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def allowlist_for(self, platform_slug: str) -> tuple[str, ...] | None:
+        """Return the filename allowlist for *platform_slug*, or None for 'all'."""
+        return self.files.get(platform_slug)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LaunchHooksConfig:
     """Settings for the `ferry install-launch-hooks` system (DESIGN.md §7 v8).
 
@@ -106,4 +130,5 @@ class Config:
     sync: SyncConfig | None = None
     transforms: TransformsConfig = field(default_factory=_empty_transforms)
     saves: SavesConfig | None = None
+    bios: BiosConfig | None = None
     launch_hooks: LaunchHooksConfig = field(default_factory=_default_launch_hooks)

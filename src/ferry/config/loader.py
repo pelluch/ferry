@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ferry.config.schema import (
+    BiosConfig,
     Config,
     LaunchHooksConfig,
     RommConfig,
@@ -21,7 +22,9 @@ from ferry.transforms import known_transforms
 ENV_API_KEY = "FERRY_ROMM_API_KEY"
 ENV_CONFIG_PATH = "FERRY_CONFIG"
 
-_TOP_LEVEL_KEYS = frozenset({"romm", "destination", "sync", "transforms", "saves", "launch_hooks"})
+_TOP_LEVEL_KEYS = frozenset(
+    {"romm", "destination", "sync", "transforms", "saves", "bios", "launch_hooks"}
+)
 _LAUNCH_HOOKS_KEYS = frozenset({"log_enabled", "log_path"})
 _ROMM_KEYS = frozenset({"url", "api_key", "allow_insecure_ssl"})
 _DESTINATION_KEYS = frozenset({"preset", "roms_base", "bios_base"})
@@ -36,6 +39,7 @@ _SYNC_KEYS = frozenset(
 )
 _TRANSFORMS_PLATFORM_KEYS = frozenset({"pipeline"})
 _SAVES_KEYS = frozenset({"enabled", "retroarch_install", "dolphin_install"})
+_BIOS_KEYS = frozenset({"enabled", "files"})
 _RETROARCH_INSTALL_VALUES = frozenset({"retrodeck-flatpak", "libretro-flatpak", "native"})
 _DOLPHIN_INSTALL_VALUES = frozenset({"retrodeck-flatpak", "emudeck-flatpak", "native"})
 
@@ -126,6 +130,7 @@ def load_config(
     sync = _parse_sync(raw, path)
     transforms = _parse_transforms(raw, path)
     saves = _parse_saves(raw, path)
+    bios = _parse_bios(raw, path)
     launch_hooks = _parse_launch_hooks(raw, path)
 
     config = Config(
@@ -138,6 +143,7 @@ def load_config(
         sync=sync,
         transforms=transforms,
         saves=saves,
+        bios=bios,
         launch_hooks=launch_hooks,
     )
     return LoadedConfig(config=config, config_path=path, api_key_source=api_key_source)
@@ -223,6 +229,40 @@ def _parse_saves(raw: dict, path: Path) -> SavesConfig | None:
         retroarch_install=retroarch_install,
         dolphin_install=dolphin_install,
     )
+
+
+def _parse_bios(raw: dict, path: Path) -> BiosConfig | None:
+    """Parse the optional `[bios]` section.
+
+    `[bios.files]` is a sub-table whose keys are arbitrary platform
+    slugs (like `[transforms]`), each mapping to a filename allowlist.
+    """
+    section = _extract_section(raw, "bios", allowed_keys=_BIOS_KEYS, path=path)
+    if section is None:
+        return None
+    enabled = section.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigInvalidError(f"[bios].enabled must be a boolean in {path}")
+
+    files: dict[str, tuple[str, ...]] = {}
+    files_raw = section.get("files", {})
+    if not isinstance(files_raw, dict):
+        raise ConfigInvalidError(f"[bios.files] must be a table in {path}")
+    for platform_slug, names in files_raw.items():
+        if not isinstance(names, list) or not all(isinstance(n, str) and n for n in names):
+            raise ConfigInvalidError(
+                f"[bios.files].{platform_slug} must be a list of non-empty strings in {path}"
+            )
+        # Preserve order, dedup defensively.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                unique.append(n)
+        files[platform_slug] = tuple(unique)
+
+    return BiosConfig(enabled=enabled, files=files)
 
 
 def _parse_sync(raw: dict, path: Path) -> SyncConfig | None:

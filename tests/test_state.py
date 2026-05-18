@@ -4,6 +4,7 @@ import pytest
 
 from ferry.domain.state import (
     CURRENT_SCHEMA_VERSION,
+    BiosRecord,
     LibraryState,
     StateDecodeError,
     StateSchemaError,
@@ -12,6 +13,20 @@ from ferry.domain.state import (
     rom_to_json,
     to_json,
 )
+
+
+def make_bios(firmware_id: int = 7, **overrides) -> BiosRecord:
+    fields = {
+        "firmware_id": firmware_id,
+        "platform_slug": "ps2",
+        "file_name": "ps2-0230a-20080220.bin",
+        "path": "ps2-0230a-20080220.bin",
+        "md5": "a" * 32,
+        "size": 4194304,
+    }
+    fields.update(overrides)
+    return BiosRecord(**fields)
+
 
 # ---------------------------------------------------------------------------
 # LibraryState roundtrips
@@ -269,3 +284,74 @@ def test_primary_output_property(make_rom, make_output) -> None:
         primary_output_index=1,
     )
     assert rom.primary_output.path == "b.iso"
+
+
+# ---------------------------------------------------------------------------
+# BIOS state (schema 3 — v5.5)
+# ---------------------------------------------------------------------------
+
+
+def test_state_with_bios_roundtrips() -> None:
+    s = LibraryState(
+        bios={
+            7: make_bios(7),
+            3: make_bios(3, platform_slug="dc", file_name="dc_boot.bin", path="dc/dc_boot.bin"),
+        },
+    )
+    decoded = from_json(to_json(s))
+    assert decoded == s
+
+
+def test_bios_keys_sorted_in_output() -> None:
+    s = LibraryState(bios={9: make_bios(9), 2: make_bios(2)})
+    parsed = json.loads(to_json(s))
+    assert list(parsed["bios"]) == ["2", "9"]
+
+
+def test_v2_state_loads_with_default_empty_bios() -> None:
+    """A pre-v5.5 (schema 2) document loads with an empty bios map."""
+    decoded = from_json(json.dumps({"schema_version": 2, "roms": {}}))
+    assert decoded.bios == {}
+
+
+def test_v1_state_loads_with_default_empty_bios() -> None:
+    decoded = from_json(json.dumps({"schema_version": 1, "roms": {}}))
+    assert decoded.bios == {}
+
+
+def test_bios_key_value_id_mismatch_raises() -> None:
+    payload = {
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "roms": {},
+        "bios": {"99": _bios_dict(firmware_id=7)},
+    }
+    with pytest.raises(StateDecodeError, match="firmware_id"):
+        from_json(json.dumps(payload))
+
+
+def test_bios_must_be_object() -> None:
+    payload = {"schema_version": CURRENT_SCHEMA_VERSION, "roms": {}, "bios": []}
+    with pytest.raises(StateDecodeError, match="bios must be an object"):
+        from_json(json.dumps(payload))
+
+
+def test_bios_record_missing_required_string_raises() -> None:
+    entry = _bios_dict(firmware_id=7)
+    del entry["file_name"]
+    payload = {"schema_version": CURRENT_SCHEMA_VERSION, "roms": {}, "bios": {"7": entry}}
+    with pytest.raises(StateDecodeError, match="bios.file_name"):
+        from_json(json.dumps(payload))
+
+
+def test_bios_record_size_must_be_int_not_bool() -> None:
+    entry = _bios_dict(firmware_id=7)
+    entry["size"] = True  # bool is an int subclass — must still be rejected
+    payload = {"schema_version": CURRENT_SCHEMA_VERSION, "roms": {}, "bios": {"7": entry}}
+    with pytest.raises(StateDecodeError, match="bios.size"):
+        from_json(json.dumps(payload))
+
+
+def _bios_dict(*, firmware_id: int) -> dict:
+    from dataclasses import asdict
+
+    return asdict(make_bios(firmware_id))

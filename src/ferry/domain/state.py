@@ -22,7 +22,9 @@ from typing import Any
 #   1 — initial v1 (rom-only state).
 #   2 — adds RomState.saves and LibraryState.device_id (v2 save sync).
 #       Loads v1 state transparently; missing fields default to empty/None.
-CURRENT_SCHEMA_VERSION = 2
+#   3 — adds LibraryState.bios (v5.5 BIOS sync). Loads v1/v2 state
+#       transparently; a missing `bios` map defaults to empty.
+CURRENT_SCHEMA_VERSION = 3
 
 
 class StateSchemaError(Exception):
@@ -69,6 +71,33 @@ class SaveRecord:
     last_sync_server_updated_at: str
     last_synced_at: str
     server_save_id: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BiosRecord:
+    """Per-firmware state — what ferry knows about one placed BIOS file.
+
+    Stored in `LibraryState.bios`, keyed by RomM's firmware id. The BIOS
+    planner diffs the current RomM firmware listing against these records
+    to decide add / update / delete, mirroring how `RomState` drives ROM
+    sync.
+
+    `path` is relative to `Destination.bios_base` so state is portable
+    when the BIOS tree moves. `md5` / `size` are of the on-disk file as
+    placed (locally computed on download), the baseline change detection
+    compares RomM's `md5_hash` / `file_size_bytes` against.
+
+    `platform_slug` records which platform the firmware was synced under
+    — it's how a delete is attributed when the platform later leaves
+    `[sync]` scope.
+    """
+
+    firmware_id: int
+    platform_slug: str
+    file_name: str
+    path: str
+    md5: str
+    size: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -122,6 +151,8 @@ class LibraryState:
     # RomM's UUID for this client. Cached after first registration so the
     # save sync flow doesn't churn on the user's RomM device list every run.
     device_id: str | None = None
+    # Synced BIOS / firmware, keyed by RomM firmware id (v5.5).
+    bios: dict[int, BiosRecord] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +167,7 @@ def to_json(state: LibraryState) -> str:
         "last_updated_after": state.last_updated_after,
         "device_id": state.device_id,
         "roms": {str(rid): asdict(r) for rid, r in sorted(state.roms.items())},
+        "bios": {str(fid): asdict(b) for fid, b in sorted(state.bios.items())},
     }
     return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -210,11 +242,28 @@ def _state_from_dict(raw: dict[str, Any]) -> LibraryState:
             raise StateDecodeError(f"key/value mismatch: roms[{rom_id}] has rom_id={rom.rom_id}")
         roms[rom_id] = rom
 
+    bios_raw = raw.get("bios", {})
+    if not isinstance(bios_raw, dict):
+        raise StateDecodeError("bios must be an object keyed by firmware_id")
+    bios: dict[int, BiosRecord] = {}
+    for key, value in bios_raw.items():
+        try:
+            firmware_id = int(key)
+        except (TypeError, ValueError) as e:
+            raise StateDecodeError(f"bios key {key!r} must be an integer") from e
+        record = _bios_record_from_dict(value)
+        if record.firmware_id != firmware_id:
+            raise StateDecodeError(
+                f"key/value mismatch: bios[{firmware_id}] has firmware_id={record.firmware_id}"
+            )
+        bios[firmware_id] = record
+
     return LibraryState(
         schema_version=schema_version,
         last_updated_after=last,
         roms=roms,
         device_id=device_id,
+        bios=bios,
     )
 
 
@@ -309,6 +358,25 @@ def _save_record_from_dict(raw: Any) -> SaveRecord:
         last_sync_server_updated_at=raw["last_sync_server_updated_at"],
         last_synced_at=raw["last_synced_at"],
         server_save_id=raw["server_save_id"],
+    )
+
+
+def _bios_record_from_dict(raw: Any) -> BiosRecord:
+    if not isinstance(raw, dict):
+        raise StateDecodeError("bios entry must be an object")
+    for field_name in ("platform_slug", "file_name", "path", "md5"):
+        if not isinstance(raw.get(field_name), str):
+            raise StateDecodeError(f"bios.{field_name} must be a string")
+    for field_name in ("firmware_id", "size"):
+        if not isinstance(raw.get(field_name), int) or isinstance(raw.get(field_name), bool):
+            raise StateDecodeError(f"bios.{field_name} must be an integer")
+    return BiosRecord(
+        firmware_id=raw["firmware_id"],
+        platform_slug=raw["platform_slug"],
+        file_name=raw["file_name"],
+        path=raw["path"],
+        md5=raw["md5"],
+        size=raw["size"],
     )
 
 
