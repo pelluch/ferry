@@ -36,36 +36,14 @@ ferry sync --dry-run       # preview what would change
 ferry sync                 # do it
 ```
 
-## Scheduled sync
-
-ferry ships a systemd user timer for unattended periodic sync:
-
-```sh
-ferry install-units                    # daily, by default
-ferry install-units --schedule hourly  # or any `OnCalendar` spec
-```
-
-This installs `ferry-sync.{service,timer}` to `~/.config/systemd/user/`,
-runs `systemctl --user daemon-reload`, and enables the timer. Re-running
-with a different `--schedule` updates the timer in place.
-
-Schedules faster than every 10 minutes are rejected — RomM library updates
-aren't real-time, and a faster cadence just hammers the server.
-
-Inspect: `systemctl --user list-timers ferry-sync.timer`
-Logs: `journalctl --user -u ferry-sync.service -f`
-
-On non-systemd distros the install command errors out with a copy-paste
-cron suggestion. Native cron support is on the roadmap (DESIGN.md §9).
-
 ## Uninstalling
 
-Run `ferry uninstall-units` **before** removing ferry — otherwise the timer
-keeps firing against a missing binary and pollutes your systemd journal.
+If you installed ES-DE launch hooks, remove them first so they don't keep
+pointing at a missing binary:
 
 ```sh
-ferry uninstall-units      # disable timer, remove unit files
-uv tool uninstall ferry    # then remove the binary
+ferry uninstall-launch-hooks   # remove the managed block + wrapper script
+uv tool uninstall ferry        # then remove the binary
 ```
 
 ## Credits

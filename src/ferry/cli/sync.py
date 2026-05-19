@@ -642,11 +642,10 @@ def _warn_on_launch_hook_upstream_drift() -> None:
     changed since `install-launch-hooks` last ran.
 
     Surfaces the same condition `ferry status` reports, but in the sync
-    output so the systemd-timer's regular runs flag it without the user
-    needing to remember to run status. Local-drift-only is intentionally
-    NOT echoed here — it's user-controlled (they edited the file), so
-    nagging on every timer fire would be noise. They'll see it on next
-    `ferry status`.
+    output so regular `ferry sync` runs flag it without the user needing
+    to remember to run status. Local-drift-only is intentionally NOT
+    echoed here — it's user-controlled (they edited the file), so nagging
+    on every sync would be noise. They'll see it on next `ferry status`.
     """
     snapshot = read_snapshot(default_snapshot_path())
     if snapshot is None:

@@ -11,7 +11,6 @@ from ferry.cli.ping import ping
 from ferry.cli.reconcile import reconcile
 from ferry.cli.status import status
 from ferry.cli.sync import sync
-from ferry.cli.units import install_units, uninstall_units
 
 
 @click.group()
@@ -51,10 +50,8 @@ def _configure_logging(verbosity: int) -> None:
 app.add_command(config_group)
 app.add_command(detect)
 app.add_command(install_launch_hooks)
-app.add_command(install_units)
 app.add_command(ping)
 app.add_command(reconcile)
 app.add_command(status)
 app.add_command(sync)
 app.add_command(uninstall_launch_hooks)
-app.add_command(uninstall_units)
